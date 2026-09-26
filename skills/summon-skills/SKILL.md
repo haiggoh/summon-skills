@@ -28,9 +28,10 @@ comes from a keyword match on the prompt, not from judgement. Treat it as a stro
 invoke the named skill via the Skill tool, or state why it does not apply. Each skill is
 suggested at most once per session, so its absence later does not mean it stopped applying.
 
-`summon-skills: pyright-lsp is installed but inert: ...` means that language's LSP plugin is
-enabled but its server binary is missing, so the LSP tool gets no diagnostics for that
-language. Mention it to the user once; installing the server is their call.
+`summon-skills: <plugin> is installed but inert: <command or $VAR> not found (...)` means an
+enabled plugin declares an LSP or MCP server whose external command (or required environment
+variable) is missing, so the plugin shows as installed but does nothing. Tell the user once,
+with the install hint. Installing is their call unless they have already asked for it.
 
 ## Tuning (CLI)
 

@@ -44,7 +44,6 @@ def home(tmp_path, monkeypatch):
     plugin("vercel", ["nextjs", "react-best-practices"])
     plugin("human-only", [("secret", False)])
     plugin("disabled-one", ["ghost"], enabled=False)
-    plugin("pyright-lsp", [])
     write_skill(ch, "dataviz")
     write_skill(ch, "media-ops")
 
@@ -131,6 +130,66 @@ def test_builtin_skills_count_as_installed(home, tmp_path, monkeypatch):
         {"id": "s", "kind": "process", "match": {"words": ["simplify"]}, "skills": ["simplify"]}]}))
     monkeypatch.setenv("SUMMON_SKILLS_ROUTES", str(routes_file))
     assert names("please simplify this") == ["simplify"]
+
+
+# ---------------------------------------------------------------- dependency (inert plugin) checks
+
+def _declare(home, plugin, mkt_entry=None, mcp=None, manifest=None):
+    root = home.ch / "plugins" / "cache" / "mkt" / plugin / "1.0.0"
+    root.mkdir(parents=True, exist_ok=True)
+    if mcp is not None:
+        (root / ".mcp.json").write_text(json.dumps(mcp))
+    if manifest is not None:
+        (root / ".claude-plugin").mkdir(exist_ok=True)
+        (root / ".claude-plugin" / "plugin.json").write_text(json.dumps(manifest))
+    home.plugin(plugin, [])
+    mdir = home.ch / "plugins" / "marketplaces" / "mkt" / ".claude-plugin"
+    mdir.mkdir(parents=True, exist_ok=True)
+    mfile = mdir / "marketplace.json"
+    data = json.loads(mfile.read_text()) if mfile.exists() else {"plugins": []}
+    if mkt_entry is not None:
+        data["plugins"].append(dict(mkt_entry, name=plugin))
+    mfile.write_text(json.dumps(data))
+    home.sync()
+
+
+def test_deps_from_marketplace_lsp_and_mcp_declarations(home, monkeypatch):
+    _declare(home, "pyright-lsp", mkt_entry={"lspServers": {"pyright": {"command": "pyright-langserver"}}})
+    _declare(home, "chat", mcp={"mcpServers": {"chat": {"command": "bun", "args": ["start"]}}})
+    _declare(home, "web", mcp={"web": {"type": "http", "url": "https://x"}})          # no command: never inert
+    _declare(home, "tok", manifest={"name": "tok", "mcpServers": {"t": {"type": "http", "url": "https://x",
+             "headers": {"Authorization": "Bearer ${TOK_PAT}", "X": "${OPT:-default}"}}}})
+    monkeypatch.setattr(ss, "find_binary", lambda name: None)
+    monkeypatch.delenv("TOK_PAT", raising=False)
+    monkeypatch.delenv("OPT", raising=False)
+    problems = {p["plugin"]: p for p in ss.inert_plugins(ss.load_index())}
+    assert problems["pyright-lsp"]["missing"] == ["pyright-langserver"]
+    assert "pipx install pyright" in problems["pyright-lsp"]["hint"]
+    assert problems["chat"]["missing"] == ["bun"]
+    assert "web" not in problems
+    assert problems["tok"]["missing"] == ["$TOK_PAT"]                    # ${OPT:-default} is optional
+
+
+def test_deps_satisfied_and_plugin_root_placeholder(home, monkeypatch):
+    _declare(home, "local", mcp={"s": {"command": "${CLAUDE_PLUGIN_ROOT}/bin/server"}})
+    monkeypatch.setattr(ss, "find_binary", lambda name: "/bin/" + name)
+    assert ss.inert_plugins(ss.load_index()) == []                        # plugin-relative path: not a PATH dep
+
+
+def test_session_start_reports_inert_plugins(home, monkeypatch):
+    _declare(home, "pyright-lsp", mkt_entry={"lspServers": {"pyright": {"command": "pyright-langserver"}}})
+    monkeypatch.setattr(ss, "find_binary", lambda name: None)
+    out = run_hook("session", {})[1]
+    assert "inert" in out and "pyright-lsp" in out and "pipx install pyright" in out
+    monkeypatch.setattr(ss, "find_binary", lambda name: "/bin/" + name)
+    assert "inert" not in run_hook("session", {})[1]                      # checked live, not from the cache
+
+
+def test_language_route_note_uses_declared_binary(home, monkeypatch):
+    _declare(home, "pyright-lsp", mkt_entry={"lspServers": {"pyright": {"command": "pyright-langserver"}}})
+    monkeypatch.setattr(ss, "find_binary", lambda name: None)
+    out = run_hook("prompt", {"session_id": "d", "prompt": "refactor utils.py"})[1]
+    assert "pyright-lsp is installed but inert" in out and "pyright-langserver" in out
 
 
 # ---------------------------------------------------------------- matcher
@@ -252,6 +311,7 @@ def test_prompt_hook_silent_on_no_match(home):
 
 
 def test_lsp_inert_note_once(home, monkeypatch):
+    _declare(home, "pyright-lsp", mkt_entry={"lspServers": {"pyright": {"command": "pyright-langserver"}}})
     monkeypatch.setattr(ss, "find_binary", lambda name: None)
     out = run_hook("prompt", {"session_id": "l", "prompt": "refactor utils.py"})[1]
     assert "pyright-lsp is installed but inert" in out
@@ -259,6 +319,7 @@ def test_lsp_inert_note_once(home, monkeypatch):
 
 
 def test_lsp_silent_when_binary_present(home, monkeypatch):
+    _declare(home, "pyright-lsp", mkt_entry={"lspServers": {"pyright": {"command": "pyright-langserver"}}})
     monkeypatch.setattr(ss, "find_binary", lambda name: "/bin/" + name)
     assert "inert" not in run_hook("prompt", {"session_id": "p", "prompt": "edit main.py"})[1]
 

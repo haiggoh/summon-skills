@@ -16,7 +16,7 @@ import tempfile
 import time
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.1.0"  # also in .claude-plugin/plugin.json and CHANGELOG.md
 SCHEMA = 1
 DEFAULT_MAX = 3
 SCAN_CHARS = 20000          # long pastes: only the head is scanned
@@ -142,6 +142,7 @@ def fingerprint(ch):
     """A stat-only digest; changes when plugins/skills are added, removed or toggled."""
     h = hashlib.sha1(("%s;%s;" % (VERSION, SCHEMA)).encode())
     files = [ch / "plugins" / "installed_plugins.json", ch / "settings.json", ch / "skills"]
+    files += sorted((ch / "plugins" / "marketplaces").glob("*/.claude-plugin/marketplace.json"))
     files += sorted((ch / "skills").glob("*"))
     for path in files:
         try:
@@ -156,10 +157,94 @@ def find_binary(name):
     return shutil.which(name, path=os.environ.get("PATH", "") + os.pathsep + extra)
 
 
+INSTALL_HINTS = {
+    "pyright-langserver": "pipx install pyright",
+    "typescript-language-server": "npm install -g typescript-language-server typescript",
+    "intelephense": "npm install -g intelephense",
+    "rust-analyzer": "rustup component add rust-analyzer (or brew install rust-analyzer)",
+    "gopls": "go install golang.org/x/tools/gopls@latest",
+    "clangd": "brew install llvm", "sourcekit-lsp": "install Xcode or brew install swift",
+    "lua-language-server": "brew install lua-language-server", "ruby-lsp": "gem install ruby-lsp",
+    "csharp-ls": "dotnet tool install --global csharp-ls", "jdtls": "brew install jdtls",
+    "kotlin-lsp": "brew install JetBrains/utils/kotlin-lsp",
+    "bun": "brew install oven-sh/bun/bun", "npx": "brew install node", "node": "brew install node",
+    "uvx": "brew install uv", "uv": "brew install uv", "docker": "install Docker Desktop",
+    "deno": "brew install deno", "python3": "brew install python",
+}
+_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(:-[^}]*)?\}")
+
+
+def _marketplace_entries(ch):
+    """{plugin_name: marketplace entry} -- some plugins (the *-lsp ones) declare servers only there."""
+    out = {}
+    for mfile in (ch / "plugins" / "marketplaces").glob("*/.claude-plugin/marketplace.json"):
+        for entry in _load_json(mfile, {}).get("plugins", []):
+            if isinstance(entry, dict) and entry.get("name"):
+                out.setdefault(entry["name"], entry)
+    return out
+
+
+def _servers(block):
+    """Normalise {"mcpServers": {...}} or a bare {name: spec} to a list of spec dicts."""
+    if not isinstance(block, dict):
+        return []
+    inner = block.get("mcpServers", block)
+    return [v for v in inner.values() if isinstance(v, dict)] if isinstance(inner, dict) else []
+
+
+def declared_deps(ch):
+    """{plugin: {"commands": [...], "env": [...]}} from each enabled plugin's own lsp/mcp declarations.
+
+    Only external requirements are kept: a command under ${CLAUDE_PLUGIN_ROOT} ships with the
+    plugin, and ${VAR:-default} references are optional, so neither can make a plugin inert.
+    """
+    market = _marketplace_entries(ch)
+    deps = {}
+    for plugin, root in enabled_plugins(ch):
+        manifest = _load_json(root / ".claude-plugin" / "plugin.json", {})
+        specs = _servers(manifest.get("lspServers")) + _servers(market.get(plugin, {}).get("lspServers"))
+        specs += _servers(manifest.get("mcpServers")) + _servers(_load_json(root / ".mcp.json", {}))
+        commands, env = [], []
+        for spec in specs:
+            cmd = spec.get("command")
+            if isinstance(cmd, str) and cmd and "${CLAUDE_PLUGIN_ROOT}" not in cmd \
+                    and not cmd.startswith((".", "/")) and cmd not in commands:
+                commands.append(cmd)
+            text = json.dumps({k: spec.get(k) for k in ("url", "headers", "env", "args")})
+            for name, default in _ENV_REF.findall(text):
+                if not default and name != "CLAUDE_PLUGIN_ROOT" and name not in env:
+                    env.append(name)
+        if commands or env:
+            deps[plugin] = {"commands": commands, "env": env}
+    return deps
+
+
+def inert_plugins(index):
+    """Enabled plugins whose declared external command or required env var is missing right now.
+
+    Checked live on every call (cheap: a few PATH lookups), so installing the missing tool
+    clears the warning immediately, without waiting for an index rebuild.
+    """
+    out = []
+    for plugin, dep in sorted(index.get("deps", {}).items()):
+        missing = [c for c in dep.get("commands", []) if not find_binary(c)]
+        missing += ["$" + v for v in dep.get("env", []) if not os.environ.get(v)]
+        if missing:
+            hints = [INSTALL_HINTS[m] for m in missing if m in INSTALL_HINTS]
+            out.append({"plugin": plugin, "missing": missing, "hint": "; ".join(hints)})
+    return out
+
+
+def describe_inert(problem):
+    text = "%s is installed but inert: %s not found" % (problem["plugin"], ", ".join(problem["missing"]))
+    return text + (" (%s)" % problem["hint"] if problem["hint"] else "")
+
+
 def build_index(ch):
     return {"schema": SCHEMA, "fingerprint": fingerprint(ch), "built_at": int(time.time()),
             "skills": discover_skills(ch),
-            "plugins": sorted(name for name, _ in enabled_plugins(ch))}
+            "plugins": sorted(name for name, _ in enabled_plugins(ch)),
+            "deps": declared_deps(ch)}
 
 
 def load_index(ch=None, force=False):
@@ -194,6 +279,9 @@ def compile_route(route):
     parts += ["(?:%s)" % r for r in m.get("regex", [])]
     parts += [r"\.%s\b" % re.escape(e.lstrip(".")) for e in m.get("ext", [])]
     route["_re"] = re.compile("|".join(parts), re.I) if parts else None
+    # cheap pre-check: a words-only route cannot match unless one word occurs as a substring
+    route["_needles"] = None if (m.get("regex") or m.get("ext")) else \
+        [w.lower() for w in m.get("words", [])]
     ex = [_phrase_re(w) for w in route.get("exclude", [])]
     route["_ex"] = re.compile("|".join(ex), re.I) if ex else None
     return route
@@ -235,8 +323,12 @@ def load_routes(defaults=None, local=None):
 
 def matching_routes(text, routes):
     text = text[:SCAN_CHARS]
+    low = text.lower()
     hits = []
     for route in routes:
+        needles = route.get("_needles")
+        if needles is not None and not any(n in low for n in needles):
+            continue
         if route["_re"] is None or not route["_re"].search(text):
             continue
         if route["_ex"] is not None and route["_ex"].search(text):
@@ -262,11 +354,14 @@ def suggest(text, routes, index, shown=(), cap=DEFAULT_MAX):
                     seen.add(skill)
                 break
         lsp = route.get("lsp")
-        if lsp and lsp.get("plugin") in plugins and "lsp:" + lsp["plugin"] not in seen:
-            if not find_binary(lsp.get("binary", "")):
-                notes.append("%s is installed but inert: %s not on PATH (%s)"
-                             % (lsp["plugin"], lsp.get("binary"), lsp.get("install", "")))
-            seen.add("lsp:" + lsp["plugin"])
+        key = "lsp:%s" % (lsp or {}).get("plugin")
+        if lsp and lsp.get("plugin") in plugins and key not in seen:
+            dep = index.get("deps", {}).get(lsp["plugin"])
+            if dep:
+                problems = inert_plugins({"deps": {lsp["plugin"]: dep}})
+                if problems:
+                    notes.append(describe_inert(problems[0]))
+            seen.add(key)
     return picked[:cap], notes
 
 
@@ -342,6 +437,10 @@ def hook_session_start(payload):
             % (len(routes), len(installed)))
     if errors:
         line += " (%d route errors: summon-skills.py doctor)" % len(errors)
+    inert = inert_plugins(index)
+    if inert:
+        line += "\nsummon-skills: " + "; ".join(describe_inert(p) for p in inert) + \
+                " -- tell the user once; installing is their call."
     marker = state_home() / "unrouted.count"
     try:
         previous = int(marker.read_text())
@@ -446,18 +545,21 @@ def cmd_doctor(args):
     print("route skills not installed: %d" % len(missing))
     for skill in missing:
         print("  - " + skill)
-    for route in routes:
-        lsp = route.get("lsp")
-        if lsp:
-            state = "enabled" if lsp.get("plugin") in index.get("plugins", []) else "not installed"
-            found = find_binary(lsp.get("binary", "")) or "MISSING (%s)" % lsp.get("install")
-            print("lsp %-20s %-13s %s" % (lsp.get("plugin"), state, found))
+    deps = index.get("deps", {})
+    inert = {p["plugin"]: p for p in inert_plugins(index)}
+    print("plugins with external dependencies: %d, inert: %d" % (len(deps), len(inert)))
+    for plugin in sorted(deps):
+        if plugin in inert:
+            print("  INERT %s" % describe_inert(inert[plugin]))
+        else:
+            print("  ok    %-24s %s" % (plugin, ", ".join(deps[plugin]["commands"] +
+                                                       ["$" + v for v in deps[plugin]["env"]])))
     t1 = time.perf_counter()
     suggest("this test fails with a KeyError traceback", routes, index)
     print("unrouted skills: %d; warm match %.1f ms; doctor total %.0f ms"
           % (len(unrouted_skills(routes, index)), (time.perf_counter() - t1) * 1000,
              (time.perf_counter() - t0) * 1000))
-    return 1 if errors else 0
+    return 1 if errors or inert else 0
 
 
 def main(argv=None):

@@ -8,6 +8,9 @@
   DuckDB, Fastly, Dataverse, Unreal, media, ComfyUI, dataviz, …), plus LSP-aware language routes.
 - Installed-skill index from enabled plugins' registered install paths, manifest `skills` paths,
   and `~/.claude/skills`. Respects `disable-model-invocation`. Rebuilt only on fingerprint change.
+- Inert-plugin detection: reads every enabled plugin's own LSP/MCP declarations (manifest,
+  `.mcp.json`, marketplace entry) and checks external commands and required `${ENV}` vars live;
+  reported at session start, in `doctor`, and on matching language prompts.
 - Per-session dedupe; fail-open hooks; `SUMMON_SKILLS_OFF` switch.
 - CLI: `match`, `doctor`, `unrouted`, `map`, `hook`, with `--help`.
 - User override file `~/.claude/summon-skills/routes.local.json`.
