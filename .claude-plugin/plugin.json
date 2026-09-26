@@ -1,9 +1,19 @@
 {
   "name": "summon-skills",
   "version": "0.1.0",
-  "description": "Makes Claude actually use the skills you already have. A local, zero-token matcher reads each prompt and names the 1-3 installed skills that fit it (debugging, planning, TDD, review, wrap-up, your languages and frameworks), process skills first, each at most once per session. Curated routes, filtered against what is installed and enabled; never suggests skills you do not have. Also flags *-lsp plugins that are installed but inert because their language server is missing. Sibling to measure-twice, brief-agents, audit-loose-ends.",
-  "author": { "name": "Heiko Brantsch" },
+  "description": "Makes Claude actually use the skills you already have: a local, zero-token matcher names the 1-3 installed skills that fit each prompt (process skills first, each once per session), never suggests skills you don't have, and flags *-lsp plugins whose language server is missing.",
+  "author": {
+    "name": "Heiko Brantsch"
+  },
   "homepage": "https://github.com/haiggoh/summon-skills",
   "license": "MIT",
-  "keywords": ["skill", "hook", "behavior", "skills", "routing", "discoverability", "lsp"]
+  "keywords": [
+    "skill",
+    "hook",
+    "behavior",
+    "skills",
+    "routing",
+    "discoverability",
+    "lsp"
+  ]
 }
