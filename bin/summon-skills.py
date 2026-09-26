@@ -16,7 +16,7 @@ import tempfile
 import time
 from pathlib import Path
 
-VERSION = "0.1.0"  # also in .claude-plugin/plugin.json and CHANGELOG.md
+VERSION = "0.1.1"  # also in .claude-plugin/plugin.json and CHANGELOG.md
 SCHEMA = 1
 DEFAULT_MAX = 3
 SCAN_CHARS = 20000          # long pastes: only the head is scanned
@@ -437,10 +437,6 @@ def hook_session_start(payload):
             % (len(routes), len(installed)))
     if errors:
         line += " (%d route errors: summon-skills.py doctor)" % len(errors)
-    inert = inert_plugins(index)
-    if inert:
-        line += "\nsummon-skills: " + "; ".join(describe_inert(p) for p in inert) + \
-                " -- tell the user once; installing is their call."
     marker = state_home() / "unrouted.count"
     try:
         previous = int(marker.read_text())
@@ -452,6 +448,10 @@ def hook_session_start(payload):
         marker.write_text(str(len(unrouted)))
     except OSError:
         pass
+    inert = inert_plugins(index)
+    if inert:
+        line += "\nsummon-skills: " + "; ".join(describe_inert(p) for p in inert) + \
+                " -- tell the user once; installing is their call."
     return line
 
 

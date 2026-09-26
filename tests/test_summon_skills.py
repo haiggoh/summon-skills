@@ -201,6 +201,9 @@ def test_language_route_note_uses_declared_binary(home, monkeypatch):
     ("exit code 1 from the installer", "superpowers:systematic-debugging"),
     ("let's build a CLI for exporting notes", "superpowers:brainstorming"),
     ("write a plan for the migration", "superpowers:writing-plans"),
+    ("let us build a new export feature", "superpowers:brainstorming"),
+    ("create a new command for exports", "superpowers:brainstorming"),
+    ("we need a new sync plugin", "superpowers:brainstorming"),
     ("add tests for the parser", "superpowers:test-driven-development"),
     ("ok, wrap", "audit-loose-ends:audit-loose-ends"),
     ("let's wrap up the session", "audit-loose-ends:audit-loose-ends"),
@@ -223,6 +226,7 @@ def test_positive_matches(home, prompt, expected):
     ("the debugger variable name", "superpowers:systematic-debugging"),
     ("rename bugfix-notes.md", "superpowers:systematic-debugging"),
     ("what's the weather like", None),
+    ("the new build is green", "superpowers:brainstorming"),
 ])
 def test_negative_matches(home, prompt, unexpected):
     got = names(prompt)
@@ -327,6 +331,17 @@ def test_lsp_silent_when_binary_present(home, monkeypatch):
 def test_session_start_line(home):
     code, out = run_hook("session", {})
     assert code == 0 and out.startswith("summon-skills:") and len(out) <= 200
+
+
+def test_session_start_unrouted_note_stays_on_status_line(home, monkeypatch):
+    _declare(home, "pyright-lsp", mkt_entry={"lspServers": {"pyright": {"command": "pyright-langserver"}}})
+    monkeypatch.setattr(ss, "find_binary", lambda name: None)
+    run_hook("session", {})                                   # records the baseline unrouted count
+    home.plugin("extra", ["brand-new"])
+    home.sync()
+    first, second = run_hook("session", {})[1].rstrip("\n").split("\n")
+    assert "unrouted" in first and "inert" not in first
+    assert "inert" in second and "unrouted" not in second
 
 
 @pytest.mark.parametrize("breakage", ["routes", "index", "stdin"])

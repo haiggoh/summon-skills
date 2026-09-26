@@ -3,7 +3,8 @@
   "builtin_skills": ["claude-api", "code-review", "security-review", "simplify", "update-config", "dataviz", "loop", "run", "init"],
   "routes": [
     {"id": "brainstorming", "kind": "process",
-     "match": {"words": ["let's build", "lets build", "new feature", "brainstorm", "i want to build", "design a", "add a feature", "new plugin", "new project"]},
+     "match": {"words": ["let's build", "lets build", "let us build", "new feature", "brainstorm", "i want to build", "we should build", "design a", "add a feature", "new plugin", "new project"],
+               "regex": ["\\b(?:build|create|make|add|design)\\s+(?:a|an|the)\\s+new\\b", "\\bnew\\s+[\\w-]+\\s+(?:feature|plugin|tool|app|command|skill)\\b"]},
      "skills": ["superpowers:brainstorming"]},
     {"id": "planning", "kind": "process",
      "match": {"words": ["implementation plan", "write a plan", "plan this", "plan out", "execution plan", "step by step plan", "roadmap for"]},

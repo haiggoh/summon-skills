@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1 — 2026-09-26
+
+- Brainstorming route also catches "let us build", "build/create/add a new …" and
+  "new <thing> feature/plugin/tool/app/command/skill" (found by dogfooding 0.1.0).
+- SessionStart: the unrouted-skills note stays on the status line instead of trailing the
+  inert-plugins line.
+
 ## 0.1.0 — 2026-09-26
 
 - First release. Local per-prompt matcher (UserPromptSubmit) and one-line SessionStart status.
