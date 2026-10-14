@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.2 — 2026-10-14
+
+- The delegation route matches dispatch intent, not vocabulary: "delegate this/that/the",
+  "dispatch a/an", "spawn a subagent", "run this in a subagent", "brief the delegate", with
+  decline-phrases excluded ("no delegation", "not delegating", "without delegating", …).
+  A prompt that merely mentions or declines delegation no longer suggests brief-agents
+  (observed: "no delegation is planned" fired the suggestion).
+
 ## 0.1.1 — 2026-09-26
 
 - Brainstorming route also catches "let us build", "build/create/add a new …" and
