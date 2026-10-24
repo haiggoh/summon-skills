@@ -53,3 +53,22 @@ first installed one is suggested. Run `match` against a positive and a negative 
 after every change.
 
 Never edit the installed plugin cache copy of `routes.json`; the next update reverts it.
+
+## Gotchas a routes table cannot hold
+
+- **A mention is not a request.** A prompt that only *discusses* a hook's runtime behaviour once
+  triggered an *authoring* skill (hook-development), because the route matched the bare noun
+  "hook". Authoring-class routes (hook, command, agent, skill development) need an intent check:
+  an authoring verb (write, add, change, fix, build) AND the artifact noun, via `regex` or an
+  `exclude` list. Every misfire should become a regression PAIR checked with `match`: the
+  discussing prompt (must not fire) next to the authoring prompt (must fire).
+- **`*-lsp` plugins are not skills.** They wire a language server into the LSP tool, never appear in
+  the skill list, and do nothing until the server binary is on PATH. `doctor` names the missing
+  binary; that is a missing install, not a missing route.
+- **Listing installed skills naively misses some.** A plugin may declare its skill directories in
+  `plugin.json` instead of `skills/` (a `skills/*/SKILL.md` glob finds none of them), and built-in
+  skills (`simplify`, `code-review`, `claude-api`, `update-config`, `security-review`) have no folder
+  at all. Read each plugin at its registered `installPath`, never the newest cache directory. Any
+  tool that enumerates skills must handle all three cases.
+- **No skill for a language** (no Python, shell, Go or Rust skill installed) is normal: the process
+  skills cover the work, and `skills find <language>` checks for one before substantial work.

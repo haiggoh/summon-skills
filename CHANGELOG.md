@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.3 — 2026-10-24
+
+- The skill gains "Gotchas a routes table cannot hold": a mention is not a request (authoring routes need
+  verb + noun intent, each misfire becomes a regression pair), `*-lsp` plugins are not skills, and the three
+  ways a naive skill listing misses skills. Moved here from the author's notes so the plugin carries its own
+  lessons. No behaviour change.
+
 ## 0.1.2 — 2026-10-14
 
 - The delegation route matches dispatch intent, not vocabulary: "delegate this/that/the",
