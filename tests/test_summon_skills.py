@@ -236,6 +236,33 @@ def test_negative_matches(home, prompt, unexpected):
         assert unexpected not in got
 
 
+@pytest.mark.parametrize("prompt", [
+    "write a handoff plan for the free session",
+    "plan the work for an unattended overnight run",
+    "draft the execution plan for the successor session",
+    "write a handover plan so another agent can execute it",
+])
+def test_execution_plan_pairs_layer_with_base(home, prompt):
+    # The layer is ADDITIVE: a route picks only its first installed skill, so the pairing needs the
+    # base planning route AND the layer route to fire on the same handoff-shaped prompt.
+    home.plugin("run-to-completion", ["writing-execution-plans"])
+    home.sync()
+    got = names(prompt)
+    assert "superpowers:writing-plans" in got
+    assert "run-to-completion:writing-execution-plans" in got
+
+
+@pytest.mark.parametrize("prompt", [
+    "write a plan for the migration",
+    "plan the database schema",
+    "hand off the keys to the new admin",
+])
+def test_execution_plan_layer_not_on_plain_planning(home, prompt):
+    home.plugin("run-to-completion", ["writing-execution-plans"])
+    home.sync()
+    assert "run-to-completion:writing-execution-plans" not in names(prompt)
+
+
 def test_process_before_domain_and_cap(home):
     got = names("let's build a chart page; it fails with a TypeError, add tests, write a plan")
     assert len(got) == 3

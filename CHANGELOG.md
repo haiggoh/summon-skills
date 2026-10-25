@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.4 — 2026-10-25
+
+- Handoff-shaped planning prompts ("handoff plan", "plan … for the successor / free session /
+  unattended run / another agent") now suggest BOTH the base plan-writing skill and
+  run-to-completion's additive `writing-execution-plans` layer. A route suggests only its first
+  installed skill, so the pairing is two routes firing on the same phrases (new route
+  `execution-plan-layer`; the planning route gains the same condition regex). Plain planning prompts
+  do not pull the layer in. Regression pairs added for both directions.
+
 ## 0.1.3 — 2026-10-24
 
 - The skill gains "Gotchas a routes table cannot hold": a mention is not a request (authoring routes need
