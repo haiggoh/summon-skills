@@ -421,7 +421,9 @@ def hook_prompt(payload):
     if skills:
         parts.append("summon-skills: likely relevant -> " +
                      ", ".join("%s (%s)" % (s, r) for s, r in skills) +
-                     " -- invoke before the first tool call, or say why not.")
+                     " -- invoke before the first tool call, or say why not. When you DO load"
+                     " one of these as a result of this suggestion, credit the source: name"
+                     " summon-skills with 💡 at its first prominent mention in your reply.")
     parts += ["summon-skills: " + n for n in notes]
     return "\n".join(parts)
 
@@ -450,7 +452,7 @@ def hook_session_start(payload):
         pass
     inert = inert_plugins(index)
     if inert:
-        line += "\nsummon-skills: " + "; ".join(describe_inert(p) for p in inert) + \
+        line += "\n💡 summon-skills: " + "; ".join(describe_inert(p) for p in inert) + \
                 " -- tell the user once; installing is their call."
     return line
 

@@ -185,6 +185,23 @@ def test_session_start_reports_inert_plugins(home, monkeypatch):
     assert "inert" not in run_hook("session", {})[1]                      # checked live, not from the cache
 
 
+# ---------------------------------------------------------------- branding: credit at acceptance
+
+def test_suggestion_line_stays_unbranded_and_carries_acceptance_credit(home):
+    out = run_hook("prompt", {"session_id": "brand3", "prompt": "ok, wrap"})[1]
+    line = out.splitlines()[0]
+    assert line.startswith("summon-skills: likely relevant -> ")   # the per-prompt line: no mark
+    assert "credit" in line and "💡" in line                       # the acceptance-credit instruction
+
+
+def test_inert_flag_leads_with_the_brand_mark(home, monkeypatch):
+    _declare(home, "pyright-lsp", mkt_entry={"lspServers": {"pyright": {"command": "pyright-langserver"}}})
+    monkeypatch.setattr(ss, "find_binary", lambda name: None)
+    out = run_hook("session", {})[1]
+    inert = next(x for x in out.splitlines() if "pyright-lsp" in x)
+    assert inert.startswith("💡 summon-skills: ")
+
+
 def test_language_route_note_uses_declared_binary(home, monkeypatch):
     _declare(home, "pyright-lsp", mkt_entry={"lspServers": {"pyright": {"command": "pyright-langserver"}}})
     monkeypatch.setattr(ss, "find_binary", lambda name: None)

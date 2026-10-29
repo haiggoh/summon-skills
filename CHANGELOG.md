@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.5 — 2026-10-28
+
+- Branding: credit at acceptance, not at speaking. The per-prompt suggestion line now ends with an
+  instruction to name summon-skills with 💡 the moment a suggested skill actually gets loaded
+  (the user sees which plugin earned the load); the inert-plugin flag line — a fix-it moment —
+  leads with 💡. The suggestion and SessionStart route-count lines themselves stay unbranded.
+  Static surfaces carry 💡 (plugin.json description, README); marketplace catalog sync rides the
+  get-haiggoh batch ship.
+
 ## 0.1.4 — 2026-10-25
 
 - Handoff-shaped planning prompts ("handoff plan", "plan … for the successor / free session /

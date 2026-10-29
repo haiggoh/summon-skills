@@ -1,7 +1,7 @@
 {
   "name": "summon-skills",
-  "version": "0.1.4",
-  "description": "Makes Claude actually use the plugins and skills you already have: a local, zero-token matcher names the 1-3 installed skills that fit each prompt (process skills first, each once per session), and plugins that are installed but inert because a declared server command or env var is missing get flagged with the fix.",
+  "version": "0.1.5",
+  "description": "💡 Makes Claude actually use the plugins and skills you already have: a local, zero-token matcher names the 1-3 installed skills that fit each prompt (process skills first, each once per session), and plugins that are installed but inert because a declared server command or env var is missing get flagged with the fix.",
   "author": {
     "name": "Heiko Brantsch"
   },

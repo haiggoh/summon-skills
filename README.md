@@ -1,4 +1,4 @@
-# summon-skills
+# 💡 summon-skills
 
 **Make Claude actually use the skills you already have.**
 
