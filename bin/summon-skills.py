@@ -421,9 +421,9 @@ def hook_prompt(payload):
     if skills:
         parts.append("summon-skills: likely relevant -> " +
                      ", ".join("%s (%s)" % (s, r) for s, r in skills) +
-                     " -- invoke before the first tool call, or say why not. When you DO load"
-                     " one of these as a result of this suggestion, credit the source: name"
-                     " summon-skills with 💡 at its first prominent mention in your reply.")
+                     " -- invoke before the first tool call, or say why not. If you load one of"
+                     " these because of this suggestion, credit it: name summon-skills at first"
+                     " mention, with its lightbulb identity emoji.")
     parts += ["summon-skills: " + n for n in notes]
     return "\n".join(parts)
 

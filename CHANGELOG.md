@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.6 — 2026-10-29
+
+- Fixed: the 0.1.5 acceptance-credit instruction emitted the 💡 glyph *inside* the per-prompt
+  suggestion listing — the one line the user sees on every matching prompt, which must stay
+  unbranded. The instruction now names the mark by description ("lightbulb identity emoji"),
+  so the glyph appears only when the assistant actually credits summon-skills at acceptance.
+  Caught by the independent final review (DeepSeek V4.1 Flash dispatch); the test now also
+  pins the glyph's ABSENCE from the listing — a mutation-pin, not just a presence check.
+
 ## 0.1.5 — 2026-10-28
 
 - Branding: credit at acceptance, not at speaking. The per-prompt suggestion line now ends with an
