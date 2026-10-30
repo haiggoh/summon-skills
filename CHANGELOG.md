@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.7 — 2026-10-30
+
+- Trimmed: the per-prompt acceptance-credit instruction (the tail of the suggestion line) lost
+  ~30 more characters of standing context cost — "If you load one because of this, credit it:
+  name summon-skills at first mention, with its lightbulb emoji." The rule is unchanged
+  (condition, action, mark-by-description); the test pins the new exact ending and the old
+  verbose phrasing's absence.
+
 ## 0.1.6 — 2026-10-29
 
 - Fixed: the 0.1.5 acceptance-credit instruction emitted the 💡 glyph *inside* the per-prompt

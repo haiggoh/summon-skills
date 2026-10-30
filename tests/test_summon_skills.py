@@ -194,9 +194,11 @@ def test_suggestion_line_stays_unbranded_and_carries_acceptance_credit(home):
     # matching prompt, and the mark belongs at acceptance — not at suggestion.
     assert "💡" not in line
     assert line.startswith("summon-skills: likely relevant -> ")
-    # The instruction names the mark by description (lightbulb), never by emitting the glyph.
-    assert line.endswith("credit it: name summon-skills at first mention, with its lightbulb"
-                         " identity emoji.")
+    # The instruction names the mark by description (lightbulb), never by emitting the glyph —
+    # and stays TIGHT: this line rides every matching prompt, so its length is a standing
+    # context cost. The 0.1.7 trim cut ~30 chars; the old verbose phrasing must stay gone.
+    assert line.endswith("credit it: name summon-skills at first mention, with its lightbulb emoji.")
+    assert "because of this suggestion" not in line
 
 
 def test_inert_flag_leads_with_the_brand_mark(home, monkeypatch):
