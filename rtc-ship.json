@@ -9,5 +9,6 @@
 
 
 
-  "refresh_plugin": "summon-skills"
+  "refresh_plugin": "summon-skills",
+  "require_default_branch_checkout": true
 }
