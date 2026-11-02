@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.9 — 2026-11-02
+
+### Fixed
+- The prompt hook no longer times out on every prompt after an unrelated settings write.
+  Incident: a write to `~/.claude/settings.json` (an env/route toggle) moved the index
+  fingerprint; the rebuild took 15-26 s under machine load; the 5 s hook timeout killed it
+  BEFORE `index.json` was written, so every following prompt restarted the same rebuild and
+  timed out again ("UserPromptSubmit hook ... timed out after 5s — output discarded"), until
+  something rebuilt the index outside a hook. Two changes:
+  - `settings.json` enters the fingerprint by the CONTENT of `enabledPlugins` only, never by
+    mtime — unrelated settings writes no longer invalidate the index.
+  - The prompt hook is stale-while-revalidate: a stale cached index is served at once and a
+    single detached `summon-skills.py reindex` (lock-guarded, 300 s stale-lock TTL) rebuilds
+    it. The first run with no index at all still builds inline; the session-start hook stays
+    synchronous so newly installed skills are announced at once (if it is killed, the next
+    prompt finishes the build in the background).
+- New `reindex` command (also what the hook spawns).
+- The script's own `VERSION` constant had drifted to 0.1.1 (plugin.json said 0.1.8); it is part
+  of the fingerprint, so plugin upgrades never invalidated the index. Now 0.1.9.
+
 ## 0.1.8 — 2026-10-31
 
 ### Changed

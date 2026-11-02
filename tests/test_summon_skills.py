@@ -454,3 +454,63 @@ def test_hook_via_subprocess(home):
                        text=True, input=json.dumps({"session_id": "x", "prompt": "fails"}),
                        env=dict(os.environ))
     assert r.returncode == 0 and "systematic-debugging" in r.stdout
+
+
+# ---- 0.1.9: the prompt hook must never be killed mid-rebuild, forever --------------------
+# Incident 2026-11-02: an unrelated settings.json write moved the fingerprint; the rebuild took
+# 15-26 s under load; the 5 s hook timeout killed it before index.json was written, so EVERY
+# later prompt restarted the same rebuild and timed out again.
+
+def test_fingerprint_ignores_unrelated_settings_writes(home):
+    fp1 = ss.fingerprint(home.ch)
+    s = json.loads((home.ch / "settings.json").read_text())
+    s["env"] = {"SOME_ROUTE": "paid"}          # what a route toggle / permission grant does
+    time.sleep(0.01)
+    (home.ch / "settings.json").write_text(json.dumps(s))
+    assert ss.fingerprint(home.ch) == fp1
+
+
+def test_fingerprint_moves_when_a_plugin_is_toggled(home):
+    fp1 = ss.fingerprint(home.ch)
+    s = json.loads((home.ch / "settings.json").read_text())
+    s["enabledPlugins"]["vercel@mkt"] = False
+    (home.ch / "settings.json").write_text(json.dumps(s))
+    assert ss.fingerprint(home.ch) != fp1
+
+
+def test_hook_serves_a_stale_index_and_reindexes_in_the_background(home, monkeypatch):
+    ss.load_index()                                    # a cached index exists
+    home.plugin("newcomer", ["fresh-skill"])
+    home.sync()                                        # fingerprint now stale
+    spawned = []
+    monkeypatch.setattr(ss.subprocess, "Popen", lambda argv, **k: spawned.append(argv))
+    monkeypatch.setattr(ss, "build_index", lambda ch: (_ for _ in ()).throw(
+        AssertionError("rebuilt synchronously inside the hook")))
+    ss.hook_prompt({"prompt": "debug this failing test", "session_id": "s1"})
+    assert len(spawned) == 1 and spawned[0][-1] == "reindex"
+
+
+def test_background_reindex_is_spawned_once_per_burst(home, monkeypatch):
+    ss.load_index()
+    home.plugin("newcomer", ["fresh-skill"])
+    home.sync()
+    spawned = []
+    monkeypatch.setattr(ss.subprocess, "Popen", lambda argv, **k: spawned.append(argv))
+    for i in range(5):
+        ss.load_index(stale_ok=True)
+    assert len(spawned) == 1
+
+
+def test_first_run_without_a_cache_still_builds(home):
+    idx = ss.load_index(stale_ok=True)
+    assert "superpowers:systematic-debugging" in idx["skills"]
+
+
+def test_reindex_command_rebuilds_and_releases_the_lock(home):
+    ss.load_index()
+    home.plugin("newcomer", ["fresh-skill"])
+    home.sync()
+    (ss.state_home() / "reindex.lock").write_text("x")
+    assert ss.main(["reindex"]) == 0
+    assert "newcomer:fresh-skill" in ss._load_json(ss.state_home() / "index.json", {})["skills"]
+    assert not (ss.state_home() / "reindex.lock").exists()

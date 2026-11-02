@@ -11,12 +11,13 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
 
-VERSION = "0.1.1"  # also in .claude-plugin/plugin.json and CHANGELOG.md
+VERSION = "0.1.9"  # also in .claude-plugin/plugin.json and CHANGELOG.md
 SCHEMA = 1
 DEFAULT_MAX = 3
 SCAN_CHARS = 20000          # long pastes: only the head is scanned
@@ -139,9 +140,15 @@ def discover_skills(ch):
 
 
 def fingerprint(ch):
-    """A stat-only digest; changes when plugins/skills are added, removed or toggled."""
+    """A stat-only digest; changes when plugins/skills are added, removed or toggled.
+
+    settings.json enters by the CONTENT of its enabledPlugins section only — never by mtime:
+    the file is rewritten by unrelated writers (env/route toggles, permission grants, other
+    sessions' hooks), and each such write used to force a full rebuild (incident 2026-11-02)."""
     h = hashlib.sha1(("%s;%s;" % (VERSION, SCHEMA)).encode())
-    files = [ch / "plugins" / "installed_plugins.json", ch / "settings.json", ch / "skills"]
+    flags = _load_json(ch / "settings.json", {}).get("enabledPlugins", {})
+    h.update(("enabledPlugins:%s;" % json.dumps(flags, sort_keys=True)).encode())
+    files = [ch / "plugins" / "installed_plugins.json", ch / "skills"]
     files += sorted((ch / "plugins" / "marketplaces").glob("*/.claude-plugin/marketplace.json"))
     files += sorted((ch / "skills").glob("*"))
     for path in files:
@@ -247,14 +254,45 @@ def build_index(ch):
             "deps": declared_deps(ch)}
 
 
-def load_index(ch=None, force=False):
-    """Return the cached index, rebuilding it only when the fingerprint moved."""
+REINDEX_LOCK_TTL = 300      # a lock older than this is a crashed reindex, not a running one
+
+
+def _spawn_reindex():
+    """Start ONE detached `reindex` (lock-guarded), so a hook never rebuilds inline."""
+    lock = state_home() / "reindex.lock"
+    try:
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if time.time() - lock.stat().st_mtime < REINDEX_LOCK_TTL:
+                return False                     # one is already running
+            lock.unlink()                        # stale: its owner died
+        except FileNotFoundError:
+            pass
+        os.close(os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    except OSError:
+        return False                             # lost the race, or no writable state dir
+    subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "reindex"],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+    return True
+
+
+def load_index(ch=None, force=False, stale_ok=False):
+    """Return the cached index, rebuilding it only when the fingerprint moved.
+
+    stale_ok (the hooks): a stale cached index is returned AT ONCE and the rebuild runs in a
+    detached process. A rebuild can take longer than the hook timeout under load; inline, it
+    was killed before index.json was written, so every later prompt restarted it (2026-11-02).
+    With no cached index at all there is nothing to serve, so the first build stays inline."""
     ch = ch or claude_home()
     path = state_home() / "index.json"
     cached = _load_json(path, None)
-    if not force and cached and cached.get("schema") == SCHEMA \
-            and cached.get("fingerprint") == fingerprint(ch):
-        return cached
+    if not force and cached and cached.get("schema") == SCHEMA:
+        if cached.get("fingerprint") == fingerprint(ch):
+            return cached
+        if stale_ok:
+            _spawn_reindex()
+            return cached
     index = build_index(ch)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -409,7 +447,7 @@ def hook_prompt(payload):
     """Return the one-line nudge for this prompt, or '' when nothing new matches."""
     session_id = payload.get("session_id") or "nosession"
     routes, _ = load_routes()
-    index = load_index()
+    index = load_index(stale_ok=True)
     shown = load_shown(session_id)
     skills, notes = suggest(payload.get("prompt") or "", routes, index, shown, _cap())
     if not skills and not notes:
@@ -431,6 +469,8 @@ def hook_prompt(payload):
 def hook_session_start(payload):
     prune_sessions()
     routes, errors = load_routes()
+    # Synchronous on purpose: announcing newly installed skills is this hook's job. If it is
+    # killed mid-build, the next prompt hook (stale_ok) finishes the build in the background.
     index = load_index()
     installed = index.get("skills", {})
     unrouted = unrouted_skills(routes, index)
@@ -564,6 +604,19 @@ def cmd_doctor(args):
     return 1 if errors or inert else 0
 
 
+def cmd_reindex(args):
+    """Rebuild index.json; always release the lock _spawn_reindex took."""
+    try:
+        index = load_index(force=True)
+    finally:
+        try:
+            (state_home() / "reindex.lock").unlink()
+        except OSError:
+            pass
+    print("indexed %d skills" % len(index.get("skills", {})))
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="summon-skills.py",
@@ -579,6 +632,8 @@ def main(argv=None):
     p = sub.add_parser("map", help="write the purpose -> skill map (markdown)")
     p.add_argument("--out", help="output path (default $SUMMON_SKILLS_HOME/map.md)")
     sub.add_parser("unrouted", help="list installed invocable skills no route mentions")
+    sub.add_parser("reindex", help="rebuild the installed-skill index now (the hooks run this "
+                                   "detached when the index is stale)")
     p = sub.add_parser("doctor", help="validate routes, index and LSP binaries")
     p.add_argument("--rebuild", action="store_true", help="force an index rebuild")
     args = parser.parse_args(argv)
@@ -588,7 +643,7 @@ def main(argv=None):
     if args.cmd == "hook":
         return run_hook("prompt" if args.kind == "prompt" else "session", sys.stdin)
     return {"match": cmd_match, "map": cmd_map, "unrouted": cmd_unrouted,
-            "doctor": cmd_doctor}[args.cmd](args)
+            "doctor": cmd_doctor, "reindex": cmd_reindex}[args.cmd](args)
 
 
 if __name__ == "__main__":
