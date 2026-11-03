@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.10 — 2026-11-03
+
+### Fixed — a skill already loaded this session is not suggested again
+
+- `hook_prompt` now unions the shown-set with the Skill tool_uses found in the session's
+  transcript (`transcript_path`), counting only entries after the last `compact_boundary`
+  (a compacted-away skill may need the reminder again). Unreadable/missing transcript fails
+  open to the old behaviour. Measured 2026-10-30: systematic-debugging was suggested one turn
+  after it was invoked (waypoint summon-skills-don-t-suggest-a).
+- Tests: loaded skill not re-suggested; compact boundary resets the set; missing transcript
+  fails open. Mutation-checked (transcript read disabled -> red). Full suite 74 passed.
+
 ## 0.1.9 — 2026-11-02
 
 ### Fixed

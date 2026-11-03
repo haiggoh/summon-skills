@@ -132,6 +132,57 @@ def test_builtin_skills_count_as_installed(home, tmp_path, monkeypatch):
     assert names("please simplify this") == ["simplify"]
 
 
+# ---------------------------------------------------------------- already-loaded skills
+
+def _debug_routes(tmp_path, monkeypatch):
+    routes_file = tmp_path / "r-debug.json"
+    routes_file.write_text(json.dumps({"schema": 1, "routes": [
+        {"id": "debug", "kind": "process", "match": {"words": ["debug"]},
+         "skills": ["superpowers:systematic-debugging"]}]}))
+    monkeypatch.setenv("SUMMON_SKILLS_ROUTES", str(routes_file))
+
+
+def _write_transcript(path, records):
+    path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+
+
+def _skill_use(name):
+    return {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Skill", "input": {"skill": name}}]}}
+
+
+def test_hook_does_not_suggest_a_skill_already_loaded_this_session(home, tmp_path, monkeypatch):
+    """waypoint summon-skills-don-t-suggest-a: seen 2026-10-30 — systematic-debugging was
+    suggested one turn after it was invoked, because dedup only knew the hook's OWN past
+    suggestions. The transcript's Skill tool_uses must count as shown."""
+    _debug_routes(tmp_path, monkeypatch)
+    tp = tmp_path / "t.jsonl"
+    _write_transcript(tp, [_skill_use("superpowers:systematic-debugging")])
+    out = ss.hook_prompt({"prompt": "debug this failing test", "session_id": "s-load",
+                          "transcript_path": str(tp)})
+    assert "systematic-debugging" not in out
+
+
+def test_loaded_skills_reset_at_a_compact_boundary(home, tmp_path, monkeypatch):
+    """A compacted-away skill may need the reminder again: only tool_uses AFTER the last
+    compact_boundary count."""
+    _debug_routes(tmp_path, monkeypatch)
+    tp = tmp_path / "t.jsonl"
+    _write_transcript(tp, [_skill_use("superpowers:systematic-debugging"),
+                           {"type": "compact_boundary"}])
+    out = ss.hook_prompt({"prompt": "debug this failing test", "session_id": "s-compact",
+                          "transcript_path": str(tp)})
+    assert "systematic-debugging" in out
+
+
+def test_unreadable_transcript_fails_open(home, tmp_path, monkeypatch):
+    """Unreadable/missing transcript = current behaviour (suggest as if nothing was loaded)."""
+    _debug_routes(tmp_path, monkeypatch)
+    out = ss.hook_prompt({"prompt": "debug this failing test", "session_id": "s-open",
+                          "transcript_path": str(tmp_path / "missing.jsonl")})
+    assert "systematic-debugging" in out
+
+
 # ---------------------------------------------------------------- dependency (inert plugin) checks
 
 def _declare(home, plugin, mkt_entry=None, mcp=None, manifest=None):

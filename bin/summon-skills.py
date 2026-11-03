@@ -418,6 +418,39 @@ def load_shown(session_id):
     return set(_load_json(_state_file(session_id), []))
 
 
+def _loaded_skills_from_transcript(payload):
+    """Skill names already invoked via the Skill tool in this session's transcript, counting
+    only tool_uses AFTER the last compact_boundary (a compacted-away skill may need the
+    reminder again). Fail OPEN: a missing/unreadable transcript returns an empty set, i.e.
+    the pre-fix behaviour (waypoint summon-skills-don-t-suggest-a)."""
+    tp = (payload.get("transcript_path") or "").strip()
+    if not tp or not os.path.isfile(tp):
+        return set()
+    loaded = set()
+    try:
+        with open(tp, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("type") == "compact_boundary":
+                    loaded = set()
+                    continue
+                for block in (rec.get("message") or {}).get("content") or []:
+                    if isinstance(block, dict) and block.get("type") == "tool_use" \
+                            and block.get("name") == "Skill":
+                        sk = (block.get("input") or {}).get("skill")
+                        if sk:
+                            loaded.add(sk)
+    except OSError:
+        return set()
+    return loaded
+
+
 def save_shown(session_id, shown):
     path = _state_file(session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -448,7 +481,7 @@ def hook_prompt(payload):
     session_id = payload.get("session_id") or "nosession"
     routes, _ = load_routes()
     index = load_index(stale_ok=True)
-    shown = load_shown(session_id)
+    shown = load_shown(session_id) | _loaded_skills_from_transcript(payload)
     skills, notes = suggest(payload.get("prompt") or "", routes, index, shown, _cap())
     if not skills and not notes:
         return ""
