@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.11 — 2026-11-11
+
+### Changed — UserPromptSubmit hook timeout 5s -> 30s
+
+- `hooks/hooks.json`: `bin/summon-skills.py hook prompt` had a 5s budget; measured
+  2026-11-10 under load avg ~80 (14 concurrent sessions) it took 5.7s cold / 1.2s warm,
+  so every prompt during a load burst timed out ("timed out after 5s" in several sessions
+  at once). A longer timeout costs nothing when the hook is fast.
+
 ## 0.1.10 — 2026-11-03
 
 ### Fixed — a skill already loaded this session is not suggested again

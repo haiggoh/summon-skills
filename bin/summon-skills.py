@@ -17,7 +17,7 @@ import tempfile
 import time
 from pathlib import Path
 
-VERSION = "0.1.9"  # also in .claude-plugin/plugin.json and CHANGELOG.md
+VERSION = "0.1.11"  # also in .claude-plugin/plugin.json and CHANGELOG.md
 SCHEMA = 1
 DEFAULT_MAX = 3
 SCAN_CHARS = 20000          # long pastes: only the head is scanned
