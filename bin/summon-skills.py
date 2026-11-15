@@ -6,6 +6,7 @@ read. The installed-skill index is rebuilt only when its fingerprint changes.
 Python 3.9 compatible (hooks may run under macOS /usr/bin/python3).
 """
 import argparse
+import glob
 import hashlib
 import json
 import os
@@ -407,6 +408,148 @@ def mentioned_skills(routes):
     return {s for r in routes for s in r.get("skills", [])}
 
 
+# ---------------------------------------------------------------- audit / replay
+# User scope 2026-11-13 (HANDOFF §6b step 1): measure BEFORE tuning routes. audit scans
+# transcripts for suggestion events and classifies each outcome per route (loaded / visible /
+# thinking-only / silent); replay re-runs suggest() over a labelled corpus. Read-only.
+
+SUGGEST_RE = re.compile(r"summon-skills: likely relevant -> ([^\s(]+) \(([^)]+)\)")
+
+
+def _transcript_files(since_days, max_files):
+    root = os.environ.get("SUMMON_SKILLS_TRANSCRIPTS") or os.path.expanduser("~/.claude/projects")
+    paths = []
+    for pat in ("*/*.jsonl", "*.jsonl"):
+        paths.extend(glob.glob(os.path.join(root, pat)))
+    try:
+        paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    except OSError:
+        pass
+    if since_days:
+        cutoff = time.time() - since_days * 86400
+        paths = [p for p in paths if os.path.getmtime(p) >= cutoff]
+    return paths[:max_files]
+
+
+def _classify_outcome(records_after, skill):
+    """loaded (a later Skill tool_use with this skill) > visible (a later assistant TEXT
+    block naming it — thinking blocks don't count) > thinking-only > silent."""
+    short = skill.split(":")[-1]
+    loaded = visible = thinking = False
+    for rec in records_after:
+        content = (rec.get("message") or {}).get("content") or []
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use" and block.get("name") == "Skill" \
+                    and (block.get("input") or {}).get("skill") == skill:
+                loaded = True
+            elif block.get("type") == "text" and short in (block.get("text") or ""):
+                visible = True
+            elif block.get("type") == "thinking" and short in (block.get("thinking") or ""):
+                thinking = True
+    if loaded:
+        return "loaded"
+    if visible:
+        return "visible"
+    if thinking:
+        return "thinking"
+    return "silent"
+
+
+def cmd_audit(args):
+    """Scan transcripts for suggestion events; classify each outcome per route."""
+    routes, _errors = load_routes()
+    per_route = {r["id"]: {"route": r["id"], "fired": 0, "loaded": 0, "visible": 0,
+                            "thinking": 0, "silent": 0} for r in routes}
+    total = 0
+    files = _transcript_files(args.since_days, args.max_files)
+    for path in files:
+        try:
+            with open(path, encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+        except OSError:
+            continue
+        records = []
+        for ln in lines:
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                records.append(json.loads(ln))
+            except ValueError:
+                records.append({})
+        for i, ln in enumerate(lines):
+            for m in SUGGEST_RE.finditer(ln):
+                skill, route_id = m.group(1), m.group(2)
+                if route_id not in per_route:
+                    continue
+                outcome = _classify_outcome(records[i + 1:], skill)
+                per_route[route_id]["fired"] += 1
+                per_route[route_id][outcome] += 1
+                total += 1
+    if args.json:
+        print(json.dumps({"total_fired": total, "routes": [per_route[r] for r in sorted(per_route)
+                                                          if per_route[r]["fired"]]}))
+        return 0
+    print("route                    fired  loaded  visible  thinking  silent")
+    for rid in sorted(per_route):
+        r = per_route[rid]
+        if not r["fired"]:
+            continue
+        print("%-24s %5d  %5d  %6d  %7d  %5d" % (rid, r["fired"], r["loaded"], r["visible"],
+                                                 r["thinking"], r["silent"]))
+    fired = sum(r["fired"] for r in per_route.values())
+    if fired:
+        loaded = sum(r["loaded"] for r in per_route.values())
+        visible = sum(r["visible"] for r in per_route.values())
+        thinking = sum(r["thinking"] for r in per_route.values())
+        print("total %d fired: loaded %.0f%% · visible %.0f%% · thinking-only %.0f%% · silent %.0f%%"
+              % (fired, 100.0 * loaded / fired, 100.0 * visible / fired,
+                 100.0 * thinking / fired, 100.0 * (fired - loaded - visible - thinking) / fired))
+    else:
+        print("no suggestion events found (scanned %d file(s))" % len(files))
+    return 0
+
+
+def cmd_replay(args):
+    """Re-run suggest() over a labelled corpus (jsonl lines: {"prompt":…, "expect":…})."""
+    routes, _errors = load_routes()
+    index = load_index(stale_ok=True)
+    lines = hits = 0
+    details = []
+    try:
+        with open(args.corpus, encoding="utf-8") as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                rec = json.loads(ln)
+                skills, _notes = suggest(rec.get("prompt") or "", routes, index, shown=set(),
+                                         cap=DEFAULT_MAX)
+                fired = [rid for _s, rid in skills]
+                expect = rec.get("expect")
+                hit = bool(expect) and expect in fired
+                lines += 1
+                hits += 1 if hit else 0
+                details.append({"prompt": rec.get("prompt", "")[:80], "fired": fired,
+                                "expect": expect, "hit": hit})
+    except OSError as e:
+        print("replay: cannot read corpus: %s" % e, file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps({"lines": lines, "hits": hits, "details": details}))
+    else:
+        for d in details:
+            print("%-6s expect=%-18s fired=%s  %s" % ("HIT" if d["hit"] else "miss",
+                                                    d["expect"] or "-", ",".join(d["fired"]) or "-",
+                                                    d["prompt"]))
+        print("replay: %d/%d corpus lines hit their expected route" % (hits, lines))
+    return 0
+
+
 # ---------------------------------------------------------------- session state
 
 def _state_file(session_id):
@@ -667,6 +810,15 @@ def main(argv=None):
     sub.add_parser("unrouted", help="list installed invocable skills no route mentions")
     sub.add_parser("reindex", help="rebuild the installed-skill index now (the hooks run this "
                                    "detached when the index is stale)")
+    p = sub.add_parser("audit", help="scan transcripts; classify each suggestion's outcome per route "
+                                     "(loaded/visible/thinking-only/silent) — read-only measurement")
+    p.add_argument("--since-days", type=int, default=14, dest="since_days")
+    p.add_argument("--max-files", type=int, default=200, dest="max_files")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("replay", help="re-run suggest() over a labelled corpus jsonl "
+                                      "({prompt, expect}); reports fired vs expected per line")
+    p.add_argument("corpus")
+    p.add_argument("--json", action="store_true")
     p = sub.add_parser("doctor", help="validate routes, index and LSP binaries")
     p.add_argument("--rebuild", action="store_true", help="force an index rebuild")
     args = parser.parse_args(argv)
@@ -675,8 +827,8 @@ def main(argv=None):
         return 2
     if args.cmd == "hook":
         return run_hook("prompt" if args.kind == "prompt" else "session", sys.stdin)
-    return {"match": cmd_match, "map": cmd_map, "unrouted": cmd_unrouted,
-            "doctor": cmd_doctor, "reindex": cmd_reindex}[args.cmd](args)
+    return {"match": cmd_match, "map": cmd_map, "unrouted": cmd_unrouted, "audit": cmd_audit,
+            "replay": cmd_replay, "doctor": cmd_doctor, "reindex": cmd_reindex}[args.cmd](args)
 
 
 if __name__ == "__main__":

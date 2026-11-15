@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.0] — 2026-11-15
+
+### Added — §6b step 1 (measure before tuning) + Phase 4 Wave B portable package
+
+- New `summon-skills.py audit` (read-only): scans transcripts for suggestion events and
+  classifies each outcome per route — loaded (a later Skill tool_use) / visible (a later
+  assistant TEXT block names it) / thinking-only / silent — as a table or `--json`, with
+  `--since-days`/`--max-files` bounds. New `summon-skills.py replay CORPUS.jsonl` re-runs
+  `suggest()` over a labelled corpus (`{"prompt":…, "expect":…}`) and reports fired-vs-
+  expected per line. Both pinned by tests with synthetic transcripts/corpus.
+- Phase 4 Wave B portable package (COORDINATION C1/C2): `scripts/build-portable.py` generates
+  the committed `portable/` — same-name manifest, skill, hooks (bin/ -> scripts/ rewritten),
+  the CLI at `scripts/summon-skills.py`, `rules/routes.json` at the portable root — with
+  `PORTABLE-BUILD.json` and a deterministic dist zip. Freshness/closure/schema pinned.
+
 ## 0.1.11 — 2026-11-11
 
 ### Changed — UserPromptSubmit hook timeout 5s -> 30s
