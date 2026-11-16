@@ -446,7 +446,14 @@ def _classify_outcome(records_after, skill):
     short = skill.split(":")[-1]
     loaded = visible = thinking = False
     for rec in records_after:
-        content = (rec.get("message") or {}).get("content") or []
+        msg = rec.get("message") or {}
+        # Only ASSISTANT text counts as a visible answer — the UserPromptSubmit hook's own
+        # suggestion line is persisted as a USER text block naming the skill, and a role-blind
+        # match would read it as an answer (review round 2: this made audit's visible count
+        # wrong and would have made the step-3 barrier clear itself).
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content") or []
         if not isinstance(content, list):
             continue
         for block in content:
@@ -620,7 +627,13 @@ def _visible_mentions(payload, pending):
                 if rec.get("type") == "compact_boundary":
                     found = set()
                     continue
-                for block in (rec.get("message") or {}).get("content") or []:
+                msg = rec.get("message") or {}
+                # Only ASSISTANT text is a visible answer — the hook's own suggestion line
+                # lands in the transcript as a USER text block naming the skill short name;
+                # counting it would clear the barrier on its own output (review round 2).
+                if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                    continue
+                for block in msg.get("content") or []:
                     if isinstance(block, dict) and block.get("type") == "text":
                         text = block.get("text") or ""
                         for short, full in shorts.items():

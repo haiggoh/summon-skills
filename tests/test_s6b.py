@@ -195,3 +195,53 @@ def test_step3_malformed_payload_never_blocks(tmp_path):
                             "tool_input": "ls -la"}) == ""      # tool_input not a dict
     assert ss.hook_pretool("not a dict") == ""                  # payload not a dict
     assert ss.hook_pretool({"session_id": SESSION_ID, "tool_name": "Bash"}) == ""
+
+
+def test_step3_suggestion_line_in_transcript_does_not_clear_barrier(tmp_path):
+    # Review round 2 (DeepSeek): _visible_mentions was role-blind — the UserPromptSubmit
+    # suggestion line is persisted as a USER text block containing the skill short name,
+    # so the barrier cleared itself and never fired in production. Only ASSISTANT text
+    # counts as a visible answer.
+    tp = _write_transcript(tmp_path, [
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "text", "text": "UserPromptSubmit hook success: summon-skills: likely relevant -> "
+                                     "waypoints:waypoints (open-items) -- invoke before the first tool call"}]}},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "text", "text": "waypoints list"}]}},
+    ])
+    ss.hook_prompt({"session_id": SESSION_ID, "cwd": str(tmp_path),
+                    "prompt": "waypoints list", "transcript_path": tp})
+    out = ss.hook_pretool({"session_id": SESSION_ID, "tool_name": "Bash",
+                           "tool_input": {"command": "ls"}, "transcript_path": tp})
+    assert out != "", "the hook's own suggestion line (user role) must NOT count as a visible answer"
+    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_step3_assistant_text_still_clears(tmp_path):
+    tp = _write_transcript(tmp_path, [
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "text", "text": "summon-skills: likely relevant -> waypoints:waypoints (open-items)"}]}},
+        _assistant_text("skipping waypoints, not needed here"),
+    ])
+    ss.hook_prompt({"session_id": SESSION_ID, "cwd": str(tmp_path),
+                    "prompt": "waypoints list", "transcript_path": tp})
+    out = ss.hook_pretool({"session_id": SESSION_ID, "tool_name": "Bash",
+                           "tool_input": {"command": "ls"}, "transcript_path": tp})
+    assert out == "", "an assistant text mention must still clear the barrier"
+
+
+def test_audit_visible_classification_ignores_user_role(tmp_path, monkeypatch, capsys):
+    # same role-blindness in the audit classifier: a user-role line naming the skill must
+    # not count as visible (the suggestion line itself would otherwise inflate it)
+    monkeypatch.setenv("SUMMON_SKILLS_TRANSCRIPTS", str(tmp_path / "projects"))
+    d = tmp_path / "projects" / "s"; d.mkdir(parents=True)
+    (d / "s1.jsonl").write_text("".join(json.dumps(r) + "\n" for r in [
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "text", "text": "summon-skills: likely relevant -> waypoints:waypoints (open-items)"}]}},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "text", "text": "later the user typed: waypoints"}]}},
+    ]), encoding="utf-8")
+    ss.main(["audit", "--json"])
+    data = json.loads(capsys.readouterr().out)
+    route = next(r for r in data["routes"] if r["route"] == "open-items")
+    assert route["silent"] == 1 and route["visible"] == 0, route
