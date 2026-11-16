@@ -18,7 +18,16 @@ import tempfile
 import time
 from pathlib import Path
 
-VERSION = "0.2.1"  # also in .claude-plugin/plugin.json and CHANGELOG.md
+def _manifest_version():
+    """Derived, never hardcoded: the manifest next to the package root is the single source
+    of truth (host: bin/../.claude-plugin/plugin.json; portable copy: scripts/../…). A
+    hardcoded VERSION constant drifted on every bump (shipped 0.2.2 while --version
+    printed 0.2.1 — caught by test_portable_cli_runs_from_portable_root)."""
+    here = Path(__file__).resolve().parent
+    return json.loads((here / ".." / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))["version"]
+
+
+VERSION = _manifest_version()
 SCHEMA = 1
 DEFAULT_MAX = 3
 SCAN_CHARS = 20000          # long pastes: only the head is scanned
