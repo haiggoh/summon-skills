@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.2.2] — 2026-11-16
+
+- feat(§6b step 3): PreToolUse deny-once barrier for unanswered skill suggestions (audit-measured; fails open after one deny)
+
 ## [0.2.1] — 2026-11-16
 
 ### Fixed — §6b staged triggering, steps 1-2 (measured)
