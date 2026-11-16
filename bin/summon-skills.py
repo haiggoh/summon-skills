@@ -18,7 +18,7 @@ import tempfile
 import time
 from pathlib import Path
 
-VERSION = "0.2.0"  # also in .claude-plugin/plugin.json and CHANGELOG.md
+VERSION = "0.2.1"  # also in .claude-plugin/plugin.json and CHANGELOG.md
 SCHEMA = 1
 DEFAULT_MAX = 3
 SCAN_CHARS = 20000          # long pastes: only the head is scanned
@@ -490,9 +490,17 @@ def cmd_audit(args):
                 per_route[route_id]["fired"] += 1
                 per_route[route_id][outcome] += 1
                 total += 1
+    denies = 0
+    for path in _transcript_files(args.since_days, args.max_files):
+        try:
+            with open(path, encoding="utf-8", errors="ignore") as f:
+                denies += sum(1 for ln in f if "denied once" in ln and "summon-skills" in ln)
+        except OSError:
+            pass
     if args.json:
-        print(json.dumps({"total_fired": total, "routes": [per_route[r] for r in sorted(per_route)
-                                                          if per_route[r]["fired"]]}))
+        print(json.dumps({"total_fired": total, "denies": denies,
+                          "routes": [per_route[r] for r in sorted(per_route)
+                                     if per_route[r]["fired"]]}))
         return 0
     print("route                    fired  loaded  visible  thinking  silent")
     for rid in sorted(per_route):
@@ -506,8 +514,8 @@ def cmd_audit(args):
         loaded = sum(r["loaded"] for r in per_route.values())
         visible = sum(r["visible"] for r in per_route.values())
         thinking = sum(r["thinking"] for r in per_route.values())
-        print("total %d fired: loaded %.0f%% · visible %.0f%% · thinking-only %.0f%% · silent %.0f%%"
-              % (fired, 100.0 * loaded / fired, 100.0 * visible / fired,
+        print("total %d fired (%d denies): loaded %.0f%% · visible %.0f%% · thinking-only %.0f%% · silent %.0f%%"
+              % (fired, denies, 100.0 * loaded / fired, 100.0 * visible / fired,
                  100.0 * thinking / fired, 100.0 * (fired - loaded - visible - thinking) / fired))
     else:
         print("no suggestion events found (scanned %d file(s))" % len(files))
@@ -619,10 +627,20 @@ def _cap():
         return DEFAULT_MAX
 
 
+def _cwd_is_linked_worktree(payload):
+    """True when the payload's cwd is already a linked worktree (.git is a FILE pointing at
+    the real gitdir) — the worktree skill's advice is already satisfied there, so suggesting
+    it again is pure noise (measured: 96 fires, 0 loads on this route)."""
+    cwd = (payload.get("cwd") or "").strip()
+    return bool(cwd) and os.path.isfile(os.path.join(cwd, ".git"))
+
+
 def hook_prompt(payload):
     """Return the one-line nudge for this prompt, or '' when nothing new matches."""
     session_id = payload.get("session_id") or "nosession"
     routes, _ = load_routes()
+    if _cwd_is_linked_worktree(payload):
+        routes = [r for r in routes if r.get("id") != "worktree"]
     index = load_index(stale_ok=True)
     shown = load_shown(session_id) | _loaded_skills_from_transcript(payload)
     skills, notes = suggest(payload.get("prompt") or "", routes, index, shown, _cap())
@@ -635,9 +653,9 @@ def hook_prompt(payload):
     if skills:
         parts.append("summon-skills: likely relevant -> " +
                      ", ".join("%s (%s)" % (s, r) for s, r in skills) +
-                     " -- invoke before the first tool call, or say why not. If you load one"
-                     " because of this, credit it: name summon-skills at first mention, with its"
-                     " lightbulb emoji.")
+                     " -- invoke before the first tool call, or say in your VISIBLE reply "
+                     "why not (thinking-only doesn't count). If you load one"
+                     ", credit it: name summon-skills at first mention with its lightbulb.")
     parts += ["summon-skills: " + n for n in notes]
     return "\n".join(parts)
 

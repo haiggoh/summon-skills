@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.1] — 2026-11-16
+
+### Fixed — §6b staged triggering, steps 1-2 (measured)
+
+- Baseline measured with `audit` on this machine's real transcripts (14 days): 929 fired —
+  loaded 20% · visible 62% · thinking-only 2% · silent 16%. Noisy routes: open-items (112),
+  worktree (96, 0 loaded), parallel-work.
+- Step 1 precision: the `worktree` route is skipped when the hook payload's cwd is already a
+  linked worktree (`.git` is a file) — the advice is already satisfied there.
+- Step 2 visibility: the hook text now demands a VISIBLE reply ("or say in your VISIBLE
+  reply why not (a thinking-only decline does not count)").
+- `audit --json` now reports a `denies` field so step 3's deny-once barrier has its gate
+  (silence must drop without new friction; denies counted per session).
+- Step 3 (PreToolUse deny-once barrier) stays staged behind a re-measured audit window.
+
 ## [0.2.0] — 2026-11-15
 
 ### Added — §6b step 1 (measure before tuning) + Phase 4 Wave B portable package

@@ -248,7 +248,7 @@ def test_suggestion_line_stays_unbranded_and_carries_acceptance_credit(home):
     # The instruction names the mark by description (lightbulb), never by emitting the glyph —
     # and stays TIGHT: this line rides every matching prompt, so its length is a standing
     # context cost. The 0.1.7 trim cut ~30 chars; the old verbose phrasing must stay gone.
-    assert line.endswith("credit it: name summon-skills at first mention, with its lightbulb emoji.")
+    assert line.endswith("credit it: name summon-skills at first mention with its lightbulb.")
     assert "because of this suggestion" not in line
 
 
