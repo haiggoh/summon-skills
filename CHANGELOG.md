@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.2.3] — 2026-11-16
+
+- fix(§6b): role-blind visible-answer detection — only assistant text clears the barrier / counts as visible
+
 ## [0.2.2] — 2026-11-16
 
 - feat(§6b step 3): PreToolUse deny-once barrier for unanswered skill suggestions (audit-measured; fails open after one deny)

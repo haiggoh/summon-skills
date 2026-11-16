@@ -64,14 +64,14 @@
     }
   ],
   "files": {
-    ".claude-plugin/plugin.json": "2f472fa91b4cb4d78ffa98af0dcc609660b9c9c3817e89ca4135fe22291d4172",
+    ".claude-plugin/plugin.json": "3b8b686f99283b421fd49851add143ed1307efe3820e7d6787b21073afd341da",
     "hooks/hooks.json": "a58f01dac64f4eb6cf64a19c96fd808ce726ac8fc527fa3189314431b4d81a74",
     "rules/routes.json": "08384401e9f4caa253bedb6f46da53cc55d666f1d47c7d2ed9880b923705fec6",
     "scripts/summon-skills.py": "56163bbf10c2c7337e8d074ee82fd5f0aadca3f971b3f09cb474a52f7b36a67a",
     "skills/summon-skills/SKILL.md": "40e07f4f8fa9a1f22f1eb12e317ade4c138ff90556edb76f9802aa609bc12e58"
   },
   "schema": "haiggoh-portable-build/1",
-  "source_commit": "4480b07374d0243fc810525baa57d500c5aa050f",
+  "source_commit": "5df61f7e07d20cd64e5e89c6c96f9c55121ed29d",
   "source_repo": "haiggoh/summon-skills",
   "transform_version": "1"
 }
