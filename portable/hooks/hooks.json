@@ -5,6 +5,9 @@
     ],
     "UserPromptSubmit": [
       {"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/summon-skills.py\" hook prompt", "timeout": 30}]}
+    ],
+    "PreToolUse": [
+      {"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/summon-skills.py\" hook pretool", "timeout": 10}]}
     ]
   }
 }

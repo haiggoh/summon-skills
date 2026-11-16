@@ -569,6 +569,59 @@ def load_shown(session_id):
     return set(_load_json(_state_file(session_id), []))
 
 
+# §6b step 3 barrier state — a SEPARATE file so the shown-set schema stays pinned by its tests.
+def _barrier_file(session_id):
+    safe = re.sub(r"[^\w.-]", "_", session_id or "nosession")[:80]
+    return session_dir() / (safe + ".barrier.json")
+
+
+def _load_barrier(session_id):
+    st = _load_json(_barrier_file(session_id), {})
+    return st if isinstance(st, dict) else {}
+
+
+def _save_barrier(session_id, st):
+    p = _barrier_file(session_id)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(st), encoding="utf-8")
+
+
+def _visible_mentions(payload, pending):
+    """Which pending skills appear in a post-compact assistant TEXT block (thinking blocks
+    don't count — same rule as the audit's visible classifier). Fail OPEN to empty: an
+    unreadable transcript never proves an answer."""
+    shorts = {}
+    for s in pending:
+        shorts.setdefault(s.split(":")[-1], s)
+        shorts.setdefault(s, s)
+    tp = (payload.get("transcript_path") or "").strip()
+    if not tp or not os.path.isfile(tp):
+        return set()
+    found = set()
+    try:
+        with open(tp, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("type") == "compact_boundary":
+                    found = set()
+                    continue
+                for block in (rec.get("message") or {}).get("content") or []:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text = block.get("text") or ""
+                        for short, full in shorts.items():
+                            if short in text:
+                                found.add(full)
+    except OSError:
+        pass
+    return found
+
+
 def _loaded_skills_from_transcript(payload):
     """Skill names already invoked via the Skill tool in this session's transcript, counting
     only tool_uses AFTER the last compact_boundary (a compacted-away skill may need the
@@ -649,6 +702,10 @@ def hook_prompt(payload):
     shown.update(s for s, _ in skills)
     shown.update("lsp:" + n.split(" ", 1)[0] for n in notes)
     save_shown(session_id, shown)
+    if skills:
+        # §6b step 3: record the pending suggestions for the PreToolUse deny-once barrier.
+        # Each new suggestion set gets a fresh denied flag (one deny per suggestion batch).
+        _save_barrier(session_id, {"pending": {s: r for s, r in skills}, "denied": False})
     parts = []
     if skills:
         parts.append("summon-skills: likely relevant -> " +
@@ -658,6 +715,76 @@ def hook_prompt(payload):
                      ", credit it: name summon-skills at first mention with its lightbulb.")
     parts += ["summon-skills: " + n for n in notes]
     return "\n".join(parts)
+
+
+def hook_pretool(payload):
+    """§6b step 3 — deny ONCE the first non-Skill tool call after a suggestion that was
+    neither loaded (Skill tool_use) nor answered in visible text (assistant text naming it;
+    thinking doesn't count). Then fail OPEN. Skill calls themselves are exempt. The deny
+    reason carries "summon-skills" + "denied once" so `audit` counts barrier denials.
+    Never raises, never wrongly blocks: any error — or a missing/unreadable transcript, from
+    which an answer cannot be proven either way — returns '' (allow)."""
+    try:
+        return _hook_pretool(payload)
+    except Exception:
+        return ""  # fail open: a hook must never wrongly block on a bug
+
+
+def _hook_pretool(payload):
+    if not isinstance(payload, dict):
+        return ""
+    session_id = payload.get("session_id") or "nosession"
+    st = _load_barrier(session_id)
+    pending = dict(st.get("pending") or {})
+    if not pending or not isinstance(pending, dict):
+        return ""
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+    if (payload.get("tool_name") or "") == "Skill":
+        sk = str(tool_input.get("skill") or "")
+        if sk in pending:
+            pending.pop(sk)
+            st["pending"] = pending
+            _save_barrier(session_id, st)
+        return ""
+    tp = (payload.get("transcript_path") or "").strip()
+    if not tp or not os.path.isfile(tp):
+        return ""  # cannot prove load/answer either way -> fail open WITHOUT denying
+    loaded = _loaded_skills_from_transcript(payload)
+    visible = _visible_mentions(payload, pending)
+    for sk in list(pending):
+        if sk in loaded or sk in visible:
+            pending.pop(sk)
+    if not pending:
+        st["pending"] = {}
+        _save_barrier(session_id, st)
+        return ""
+    # Deny at most once per suggestion batch — claimed ATOMICALLY: two parallel tool calls
+    # in one block run two hook processes; a plain read-modify-write of a flag can let both
+    # read denied=false and both deny. The O_EXCL claim file is the single-writer arbiter;
+    # named *.json so prune_sessions' TTL glob covers it.
+    claim = _barrier_file(session_id).with_name(
+        _barrier_file(session_id).name.replace(".barrier.json", ".deny.json"))
+    try:
+        fd = os.open(str(claim), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+    except FileExistsError:
+        return ""  # already denied once for this batch -> fail open
+    skill = next(iter(pending))
+    st["denied"] = True
+    try:
+        _save_barrier(session_id, st)
+    except OSError:
+        pass  # the claim file already guarantees the once-only invariant
+    return json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": (
+            "summon-skills: '%s' was suggested for this task and is neither loaded nor "
+            "answered in your visible reply — this call is denied once. Invoke the skill "
+            "(or say in your visible reply why not), then re-issue this call; the barrier "
+            "fails open after one deny." % skill)}})
 
 
 def hook_session_start(payload):
@@ -704,7 +831,12 @@ def run_hook(kind, stdin):
     try:
         raw = stdin.read()
         payload = json.loads(raw) if raw.strip() else {}
-        out = hook_prompt(payload) if kind == "prompt" else hook_session_start(payload)
+        if kind == "prompt":
+            out = hook_prompt(payload)
+        elif kind == "pretool":
+            out = hook_pretool(payload)
+        else:
+            out = hook_session_start(payload)
         if out:
             sys.stdout.write(out + "\n")
     except Exception as exc:  # fail open by design
@@ -819,7 +951,7 @@ def main(argv=None):
     parser.add_argument("--version", action="version", version=VERSION)
     sub = parser.add_subparsers(dest="cmd", metavar="COMMAND")
     p = sub.add_parser("hook", help="hook entry point (reads hook JSON on stdin)")
-    p.add_argument("kind", choices=["session-start", "prompt"])
+    p.add_argument("kind", choices=["session-start", "prompt", "pretool"])
     p = sub.add_parser("match", help="show what would be suggested for TEXT")
     p.add_argument("text", nargs="+")
     p.add_argument("--max", type=int, default=DEFAULT_MAX)
@@ -844,7 +976,8 @@ def main(argv=None):
         parser.print_help(sys.stderr)
         return 2
     if args.cmd == "hook":
-        return run_hook("prompt" if args.kind == "prompt" else "session", sys.stdin)
+        kind = {"prompt": "prompt", "pretool": "pretool"}.get(args.kind, "session")
+        return run_hook(kind, sys.stdin)
     return {"match": cmd_match, "map": cmd_map, "unrouted": cmd_unrouted, "audit": cmd_audit,
             "replay": cmd_replay, "doctor": cmd_doctor, "reindex": cmd_reindex}[args.cmd](args)
 
