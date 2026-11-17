@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.2.4] — 2026-11-17
+
+- Recognize visible assistant acknowledgements in native Codex transcripts, so skill suggestions do not falsely block the next tool call. User text and reasoning remain excluded, and compaction resets old acknowledgements.
+
 ## [0.2.3] — 2026-11-16
 
 - fix(§6b): role-blind visible-answer detection — only assistant text clears the barrier / counts as visible

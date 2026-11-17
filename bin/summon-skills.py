@@ -602,6 +602,29 @@ def _save_barrier(session_id, st):
     p.write_text(json.dumps(st), encoding="utf-8")
 
 
+def _is_compact_boundary(rec):
+    """Both harnesses discard earlier context at compaction."""
+    return (rec.get("type") in ("compact_boundary", "compacted")
+            or (rec.get("type") == "event_msg"
+                and isinstance(rec.get("payload"), dict)
+                and rec["payload"].get("type") == "context_compacted"))
+
+
+def _assistant_text_blocks(rec):
+    """Visible assistant text only: Claude messages and native Codex response items."""
+    msg = rec.get("message")
+    if rec.get("type") == "response_item":
+        msg = rec.get("payload")
+        if not isinstance(msg, dict) or msg.get("type") != "message":
+            return []
+        if msg.get("phase") not in (None, "commentary", "final_answer"):
+            return []
+    if not isinstance(msg, dict) or msg.get("role") != "assistant":
+        return []
+    return [b.get("text") or "" for b in msg.get("content") or []
+            if isinstance(b, dict) and b.get("type") in ("text", "output_text")]
+
+
 def _visible_mentions(payload, pending):
     """Which pending skills appear in a post-compact assistant TEXT block (thinking blocks
     don't count — same rule as the audit's visible classifier). Fail OPEN to empty: an
@@ -624,21 +647,13 @@ def _visible_mentions(payload, pending):
                     rec = json.loads(line)
                 except ValueError:
                     continue
-                if rec.get("type") == "compact_boundary":
+                if _is_compact_boundary(rec):
                     found = set()
                     continue
-                msg = rec.get("message") or {}
-                # Only ASSISTANT text is a visible answer — the hook's own suggestion line
-                # lands in the transcript as a USER text block naming the skill short name;
-                # counting it would clear the barrier on its own output (review round 2).
-                if not isinstance(msg, dict) or msg.get("role") != "assistant":
-                    continue
-                for block in msg.get("content") or []:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        text = block.get("text") or ""
-                        for short, full in shorts.items():
-                            if short in text:
-                                found.add(full)
+                for text in _assistant_text_blocks(rec):
+                    for short, full in shorts.items():
+                        if short in text:
+                            found.add(full)
     except OSError:
         pass
     return found
@@ -663,7 +678,7 @@ def _loaded_skills_from_transcript(payload):
                     rec = json.loads(line)
                 except ValueError:
                     continue
-                if rec.get("type") == "compact_boundary":
+                if _is_compact_boundary(rec):
                     loaded = set()
                     continue
                 for block in (rec.get("message") or {}).get("content") or []:
