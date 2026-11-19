@@ -232,6 +232,7 @@ def test_session_start_reports_inert_plugins(home, monkeypatch):
     monkeypatch.setattr(ss, "find_binary", lambda name: None)
     out = run_hook("session", {})[1]
     assert "inert" in out and "pyright-lsp" in out and "pipx install pyright" in out
+    assert "Python language server" in out and "no editor feedback" in out  # purpose + impact, not a side note
     monkeypatch.setattr(ss, "find_binary", lambda name: "/bin/" + name)
     assert "inert" not in run_hook("session", {})[1]                      # checked live, not from the cache
 

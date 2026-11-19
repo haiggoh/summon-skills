@@ -252,9 +252,35 @@ def inert_plugins(index):
     return out
 
 
+# What each missing command DOES and why it matters, so the note reads as an offer,
+# not a side note (user 2026-11-19: "jdtls-lsp installed but inert" read as unimportant).
+TOOL_PURPOSE = {
+    "jdtls": "Java language server (Eclipse JDT.LS): real diagnostics, go-to-definition and refactoring for .java files — without it, Java edits get no editor intelligence",
+    "pyright-langserver": "Python language server: type-checking and navigation for .py files",
+    "typescript-language-server": "TypeScript language server: type errors and navigation for .ts/.tsx/.js files",
+    "intelephense": "PHP language server: diagnostics and navigation for .php files",
+    "rust-analyzer": "Rust language server: type errors and navigation for .rs files",
+    "gopls": "Go language server: type errors and navigation for .go files",
+    "clangd": "C/C++ language server: diagnostics and navigation for C/C++/ObjC files",
+    "sourcekit-lsp": "Swift language server: diagnostics and navigation for .swift files",
+    "csharp-ls": "C# language server: diagnostics and navigation for .cs files",
+    "kotlin-lsp": "Kotlin language server: diagnostics and navigation for .kt files",
+    "lua-language-server": "Lua language server: diagnostics and navigation for .lua files",
+    "ruby-lsp": "Ruby language server: diagnostics and navigation for .rb files",
+}
+
+
 def describe_inert(problem):
-    text = "%s is installed but inert: %s not found" % (problem["plugin"], ", ".join(problem["missing"]))
-    return text + (" (%s)" % problem["hint"] if problem["hint"] else "")
+    missing = ", ".join(problem["missing"])
+    text = "%s is installed but inert: %s not found on PATH" % (problem["plugin"], missing)
+    for m in problem["missing"]:
+        if m in TOOL_PURPOSE:
+            text += ". %s does %s" % (m, TOOL_PURPOSE[m])
+            break
+    text += " — until installed, that plugin gives no editor feedback for its language."
+    if problem["hint"]:
+        text += " One-time install: %s" % problem["hint"]
+    return text
 
 
 def build_index(ch):

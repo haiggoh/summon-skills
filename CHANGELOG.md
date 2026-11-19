@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.2.5] — 2026-11-19
+
+### Fixed — inert-plugin notes now say what the missing tool DOES and why it matters (user 2026-11-19: the bare 'installed but inert' line read as an unimportant side note). Each note names the language server's purpose (e.g. jdtls = Java diagnostics/navigation for .java) and the impact ('no editor feedback for its language until installed'), then the one-time install hint. Test pinned.
+
 ## [0.2.4] — 2026-11-17
 
 - Recognize visible assistant acknowledgements in native Codex transcripts, so skill suggestions do not falsely block the next tool call. User text and reasoning remain excluded, and compaction resets old acknowledgements.
