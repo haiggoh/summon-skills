@@ -13,6 +13,11 @@ spec.loader.exec_module(ss)
 SKILL = "superpowers:systematic-debugging"
 
 
+@pytest.fixture(autouse=True)
+def isolated_sessions(tmp_path, monkeypatch):
+    monkeypatch.setattr(ss, "session_dir", lambda: tmp_path / "sessions")
+
+
 def pretool(tmp_path, records):
     transcript = tmp_path / "rollout.jsonl"
     transcript.write_text("".join(json.dumps(r) + "\n" for r in records))

@@ -19,6 +19,7 @@ spec.loader.exec_module(ss)
 
 @pytest.fixture(autouse=True)
 def _state(tmp_path, monkeypatch):
+    monkeypatch.setattr(ss, "session_dir", lambda: tmp_path / "sessions")
     monkeypatch.setenv("SUMMON_SKILLS_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("SUMMON_SKILLS_TRANSCRIPTS", str(tmp_path / "projects"))
     monkeypatch.setenv("SUMMON_SKILLS_ROUTES", str(ROOT / "rules" / "routes.json"))

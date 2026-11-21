@@ -647,7 +647,7 @@ def _session_lock(session_id):
     directory.mkdir(parents=True, exist_ok=True)
     guard = os.open(str(directory), os.O_RDONLY)
     fd = None
-    deadline = time.monotonic() + 0.5
+    deadline = time.monotonic() + 1.0
     try:
         while True:
             if time.monotonic() >= deadline:
