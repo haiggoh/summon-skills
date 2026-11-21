@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.6] — 2026-11-21
+
+- Keep deny-once claims separate for each suggestion batch, including concurrent and late hook calls.
+- Match visible skill acknowledgements by complete names; ambiguous short names no longer clear another skill.
+
 ## [0.2.5] — 2026-11-19
 
 ### Fixed — inert-plugin notes now say what the missing tool DOES and why it matters (user 2026-11-19: the bare 'installed but inert' line read as an unimportant side note). Each note names the language server's purpose (e.g. jdtls = Java diagnostics/navigation for .java) and the impact ('no editor feedback for its language until installed'), then the one-time install hint. Test pinned.

@@ -181,7 +181,8 @@ def test_step3_deny_claim_is_atomic(tmp_path):
     # Two parallel hook processes must not both deny: the O_EXCL claim file arbitrates.
     _, tp = _suggest_waypoints(tmp_path)
     claim = ss._barrier_file(SESSION_ID).with_name(
-        ss._barrier_file(SESSION_ID).name.replace(".barrier.json", ".deny.json"))
+        ss._barrier_file(SESSION_ID).name.replace(
+            ".barrier.json", "." + ss._load_barrier(SESSION_ID)["batch"] + ".deny.json"))
     claim.parent.mkdir(parents=True, exist_ok=True)
     claim.touch()   # simulate the other process having claimed the deny first
     out = ss.hook_pretool({"session_id": SESSION_ID, "tool_name": "Bash",
