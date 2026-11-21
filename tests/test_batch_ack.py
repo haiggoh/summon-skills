@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
+import time
 
 import pytest
 
@@ -41,6 +42,75 @@ def test_parallel_calls_deny_only_once(setup):
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(lambda _: ss.hook_pretool(setup), range(8)))
     assert sum(bool(r) for r in results) == 1
+
+
+def test_other_session_progresses_while_first_is_locked(setup, monkeypatch):
+    prompt(setup, 'first:one')
+    entered, release = Event(), Event()
+    original = ss._visible_mentions
+
+    def paused(payload, pending):
+        if payload['session_id'] == 'test':
+            entered.set()
+            assert release.wait(5)
+        return original(payload, pending)
+
+    monkeypatch.setattr(ss, '_visible_mentions', paused)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(ss.hook_pretool, setup)
+        try:
+            assert entered.wait(5)
+            other = dict(setup, session_id='other')
+            second = pool.submit(prompt, other, 'second:two')
+            assert second.result(timeout=1)
+        finally:
+            release.set()
+        assert first.result(timeout=5)
+
+
+def test_same_session_lock_wait_is_bounded_and_fails_open(setup, monkeypatch):
+    prompt(setup, 'first:one')
+    entered, release = Event(), Event()
+    original = ss._visible_mentions
+
+    def paused(*args):
+        entered.set()
+        assert release.wait(5)
+        return original(*args)
+
+    monkeypatch.setattr(ss, '_visible_mentions', paused)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(ss.hook_pretool, setup)
+        try:
+            assert entered.wait(5)
+            start = time.monotonic()
+            assert ss.hook_pretool(setup) == ''
+            assert time.monotonic() - start < 2
+        finally:
+            release.set()
+        assert first.result(timeout=5)
+
+
+def test_stale_lock_cleanup_preserves_locked_session(setup):
+    prompt(setup, 'first:one')
+    path = ss.session_dir() / 'test.lock'
+    old = time.time() - ss.STATE_TTL - 1
+    with ss._session_lock('test'):
+        import os
+        os.utime(path, (old, old))
+        ss.prune_sessions()
+        assert path.exists()
+    ss.prune_sessions()
+    assert not path.exists()
+
+
+def test_no_flock_keeps_cli_usable_and_hooks_fail_open(setup, monkeypatch, capsys):
+    monkeypatch.setattr(ss, 'fcntl', None)
+    with pytest.raises(SystemExit) as result:
+        ss.main(['--version'])
+    assert result.value.code == 0
+    assert capsys.readouterr().out.strip() == '0.2.6'
+    assert ss.hook_pretool(setup) == ''
 
 
 def test_late_old_save_does_not_replace_new_batch(setup, monkeypatch):
