@@ -6,6 +6,7 @@ read. The installed-skill index is rebuilt only when its fingerprint changes.
 Python 3.9 compatible (hooks may run under macOS /usr/bin/python3).
 """
 import argparse
+import fcntl
 import glob
 import hashlib
 import json
@@ -16,6 +17,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 def _manifest_version():
@@ -622,10 +625,28 @@ def _load_barrier(session_id):
     return st if isinstance(st, dict) else {}
 
 
-def _save_barrier(session_id, st):
+def _save_barrier(session_id, st, new_batch=False):
     p = _barrier_file(session_id)
     p.parent.mkdir(parents=True, exist_ok=True)
+    if not new_batch:
+        current = _load_barrier(session_id)
+        if current.get("batch") != st.get("batch"):
+            return
     p.write_text(json.dumps(st), encoding="utf-8")
+
+
+@contextmanager
+def _session_lock():
+    # Lock the directory itself: no separate lockfile can be unlinked by TTL cleanup.
+    directory = session_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(directory), os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def _is_compact_boundary(rec):
@@ -657,8 +678,7 @@ def _visible_mentions(payload, pending):
     unreadable transcript never proves an answer."""
     shorts = {}
     for s in pending:
-        shorts.setdefault(s.split(":")[-1], s)
-        shorts.setdefault(s, s)
+        shorts.setdefault(s.split(":")[-1], []).append(s)
     tp = (payload.get("transcript_path") or "").strip()
     if not tp or not os.path.isfile(tp):
         return set()
@@ -677,9 +697,12 @@ def _visible_mentions(payload, pending):
                     found = set()
                     continue
                 for text in _assistant_text_blocks(rec):
-                    for short, full in shorts.items():
-                        if short in text:
-                            found.add(full)
+                    for match in re.finditer(r"[\w]+(?:[.-][\w]+)*(?::[\w]+(?:[.-][\w]+)*)*", text):
+                        name = match.group()
+                        if name in pending:
+                            found.add(name)
+                        elif name in shorts and len(shorts[name]) == 1:
+                            found.add(shorts[name][0])
     except OSError:
         pass
     return found
@@ -753,6 +776,11 @@ def _cwd_is_linked_worktree(payload):
 
 def hook_prompt(payload):
     """Return the one-line nudge for this prompt, or '' when nothing new matches."""
+    with _session_lock():
+        return _hook_prompt(payload)
+
+
+def _hook_prompt(payload):
     session_id = payload.get("session_id") or "nosession"
     routes, _ = load_routes()
     if _cwd_is_linked_worktree(payload):
@@ -768,7 +796,8 @@ def hook_prompt(payload):
     if skills:
         # §6b step 3: record the pending suggestions for the PreToolUse deny-once barrier.
         # Each new suggestion set gets a fresh denied flag (one deny per suggestion batch).
-        _save_barrier(session_id, {"pending": {s: r for s, r in skills}, "denied": False})
+        _save_barrier(session_id, {"pending": {s: r for s, r in skills}, "denied": False,
+                                   "batch": uuid.uuid4().hex}, new_batch=True)
     parts = []
     if skills:
         parts.append("summon-skills: likely relevant -> " +
@@ -788,7 +817,8 @@ def hook_pretool(payload):
     Never raises, never wrongly blocks: any error — or a missing/unreadable transcript, from
     which an answer cannot be proven either way — returns '' (allow)."""
     try:
-        return _hook_pretool(payload)
+        with _session_lock():
+            return _hook_pretool(payload)
     except Exception:
         return ""  # fail open: a hook must never wrongly block on a bug
 
@@ -828,7 +858,8 @@ def _hook_pretool(payload):
     # read denied=false and both deny. The O_EXCL claim file is the single-writer arbiter;
     # named *.json so prune_sessions' TTL glob covers it.
     claim = _barrier_file(session_id).with_name(
-        _barrier_file(session_id).name.replace(".barrier.json", ".deny.json"))
+        _barrier_file(session_id).name.replace(".barrier.json",
+            "." + st["batch"] + ".deny.json" if st.get("batch") else ".deny.json"))
     try:
         fd = os.open(str(claim), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         os.close(fd)
