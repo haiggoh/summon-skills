@@ -61,6 +61,54 @@ def test_parallel_calls_never_exceed_two_reminders(setup):
         assert "summon-skills reminder" in r and "permissionDecision" not in r, r
 
 
+def test_ttl_pruned_claims_do_not_reset_reminder_budget(setup):
+    # prune_sessions can delete .remindN.json claim files (TTL) while the barrier file
+    # survives (its mtime is refreshed on every save) — the barrier's reminders counter
+    # must act as the floor so the batch still goes silent after 2 reminders.
+    prompt(setup, 'first:one')
+    assert ss.hook_pretool(setup)
+    assert ss.hook_pretool(setup)
+    for p in ss.session_dir().glob('*.remind*.json'):
+        p.unlink()   # simulate TTL pruning of the claim files
+    assert ss.hook_pretool(setup) == "", "pruned claims must not reset the reminder budget"
+
+
+def test_parallel_calls_without_session_lock_still_cap_at_two(setup, monkeypatch):
+    # The O_EXCL claim files — not the flock — are the real arbiter: with the session
+    # lock disabled, 8 racing calls must still produce exactly 2 reminders.
+    import contextlib
+    monkeypatch.setattr(ss, '_session_lock', lambda session_id: contextlib.nullcontext())
+    prompt(setup, 'first:one')
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: ss.hook_pretool(setup), range(8)))
+    non_empty = [r for r in results if r]
+    assert len(non_empty) == 2, results
+    for r in non_empty:
+        assert 'permissionDecision' not in r, r
+
+
+def test_cli_hook_pretool_never_denies(setup, monkeypatch, capsys):
+    # End-to-end through the CLI boundary: main(['hook', 'pretool']) must exit 0 and emit
+    # exactly {"hookSpecificOutput": {...}} with no permissionDecision — a non-zero exit
+    # or a blocking key at this boundary would block the tool call in the real runtime.
+    import io
+    import sys
+    prompt(setup, 'first:one')
+    payload = json.dumps(setup)
+    monkeypatch.setattr(sys, 'stdin', io.StringIO(payload))
+    assert ss.main(['hook', 'pretool']) == 0
+    d = json.loads(capsys.readouterr().out.strip())
+    assert list(d.keys()) == ['hookSpecificOutput'], d
+    assert 'permissionDecision' not in d['hookSpecificOutput'], d
+    assert 'summon-skills reminder' in d['hookSpecificOutput']['additionalContext'], d
+    monkeypatch.setattr(sys, 'stdin', io.StringIO(payload))
+    assert ss.main(['hook', 'pretool']) == 0
+    capsys.readouterr()
+    monkeypatch.setattr(sys, 'stdin', io.StringIO(payload))
+    assert ss.main(['hook', 'pretool']) == 0
+    assert capsys.readouterr().out == '', 'third call on the batch must be silent'
+
+
 def test_pretool_never_emits_permission_decision(setup):
     prompt(setup, 'first:one')
     outs = [ss.hook_pretool(setup) for _ in range(4)]

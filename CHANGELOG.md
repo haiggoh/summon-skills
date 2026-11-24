@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.2.6] — 2026-11-21
+## [0.2.6] — 2026-11-24
 
 ### Changed — the PreToolUse barrier no longer denies any tool call; an unanswered suggestion now gets at most two non-blocking reminders per batch (user decision 2026-11-23: zero denials). The reminders are emitted as `hookSpecificOutput.additionalContext` on both Claude Code and Codex, so the call always proceeds; after the second reminder the hook goes silent. `audit --json` gains a `reminders` field; `denies` is kept and now counts only legacy "denied once" lines.
 

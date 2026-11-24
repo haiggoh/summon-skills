@@ -940,6 +940,11 @@ def _hook_pretool(payload):
     # parallel tool calls in one block run two hook processes; a plain read-modify-write of
     # a counter can let both read reminders=0 and both remind. The O_EXCL claim files are
     # the single-writer arbiter; named *.json so prune_sessions' TTL glob covers them.
+    # The barrier's own reminders counter is the FLOOR: prune_sessions can delete old claim
+    # files while a refreshed barrier survives, and without this floor that would reset the
+    # budget and allow more than REMINDER_LIMIT reminders for one batch.
+    if (st.get("reminders") or 0) >= REMINDER_LIMIT:
+        return ""  # budget already spent for this batch -> go silent (fail open)
     n = _claim_reminder(session_id, st.get("batch"))
     if n is None:
         return ""  # all reminder slots taken for this batch -> go silent (fail open)

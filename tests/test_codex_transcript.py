@@ -1,4 +1,4 @@
-"""Codex transcript regression: a visible acknowledgement must prevent a false denial."""
+"""Codex transcript regression: a visible acknowledgement must prevent a false reminder (never a denial)."""
 import importlib.util
 import json
 from pathlib import Path
