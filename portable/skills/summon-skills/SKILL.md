@@ -28,11 +28,11 @@ comes from a keyword match on the prompt, not from judgement. Treat it as a stro
 invoke the named skill via the Skill tool, or state why it does not apply. Each skill is
 suggested at most once per session, so its absence later does not mean it stopped applying.
 
-**Deny-once barrier:** if you proceed to a non-Skill tool call while a suggestion is still
-neither loaded nor answered in your VISIBLE reply, the first such call is denied ONCE with
-the skill name and the remedy; re-issue the call after invoking the skill or stating why not.
-The barrier then fails open (it never blocks twice per suggestion), and thinking-only mentions
-don't count as an answer — same rule the suggestion line states.
+**Reminder barrier (never blocks):** if you proceed to a non-Skill tool call while a suggestion
+is still neither loaded nor answered in your VISIBLE reply, the hook sends up to TWO
+non-blocking reminders (each carrying the skill name and the remedy) as additional context —
+your tool call is NEVER denied. After two reminders per suggestion batch the hook goes silent,
+and thinking-only mentions don't count as an answer — same rule the suggestion line states.
 
 `summon-skills: <plugin> is installed but inert: <command or $VAR> not found (...)` means an
 enabled plugin declares an LSP or MCP server whose external command (or required environment
