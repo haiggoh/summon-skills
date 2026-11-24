@@ -84,6 +84,31 @@ def test_audit_json_has_denies_field(tmp_path, monkeypatch, capsys):
     assert data["total_fired"] == 1
 
 
+def test_audit_counts_reminders_and_legacy_denies(tmp_path, monkeypatch, capsys):
+    # 1 legacy "denied once" line + 2 "summon-skills reminder" lines -> denies==1, reminders==2
+    monkeypatch.setenv("SUMMON_SKILLS_TRANSCRIPTS", str(tmp_path / "projects"))
+    d = tmp_path / "projects" / "s"
+    d.mkdir(parents=True)
+    lines = [
+        json.dumps({"type": "user", "message": {"role": "user", "content": [
+            {"type": "text", "text": "UserPromptSubmit hook success: summon-skills: likely relevant -> "
+                                     "waypoints:waypoints (open-items) -- invoke before the first tool call"}]}}),
+        json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "PreToolUse hook: summon-skills: 'waypoints:waypoints' ... denied once. "
+                                    "Invoke the skill ..."}]}}),
+        json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "summon-skills reminder 1/2: 'waypoints:waypoints' ... NOT blocked."}]}}),
+        json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "summon-skills reminder 2/2: 'waypoints:waypoints' ... NOT blocked."}]}}),
+    ]
+    (d / "s1.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    ss.main(["audit", "--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert data["denies"] == 1, data       # legacy "denied once" lines stay counted
+    assert data["reminders"] == 2, data
+    assert data["total_fired"] == 1, data
+
+
 # ---------------------------------------------------------------- §6b step 3: reminder barrier (never denies)
 
 def _write_transcript(tmp_path, records):

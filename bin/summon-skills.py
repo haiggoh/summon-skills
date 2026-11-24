@@ -540,15 +540,22 @@ def cmd_audit(args):
                 per_route[route_id]["fired"] += 1
                 per_route[route_id][outcome] += 1
                 total += 1
-    denies = 0
+    denies = 0       # legacy "denied once" lines from the old barrier (kept for history)
+    reminders = 0   # current "summon-skills reminder" lines (the barrier never denies)
     for path in _transcript_files(args.since_days, args.max_files):
         try:
             with open(path, encoding="utf-8", errors="ignore") as f:
-                denies += sum(1 for ln in f if "denied once" in ln and "summon-skills" in ln)
+                for ln in f:
+                    if "summon-skills" not in ln:
+                        continue
+                    if "denied once" in ln:
+                        denies += 1
+                    if "summon-skills reminder" in ln:
+                        reminders += 1
         except OSError:
             pass
     if args.json:
-        print(json.dumps({"total_fired": total, "denies": denies,
+        print(json.dumps({"total_fired": total, "denies": denies, "reminders": reminders,
                           "routes": [per_route[r] for r in sorted(per_route)
                                      if per_route[r]["fired"]]}))
         return 0
@@ -564,8 +571,8 @@ def cmd_audit(args):
         loaded = sum(r["loaded"] for r in per_route.values())
         visible = sum(r["visible"] for r in per_route.values())
         thinking = sum(r["thinking"] for r in per_route.values())
-        print("total %d fired (%d denies): loaded %.0f%% · visible %.0f%% · thinking-only %.0f%% · silent %.0f%%"
-              % (fired, denies, 100.0 * loaded / fired, 100.0 * visible / fired,
+        print("total %d fired (%d denies, %d reminders): loaded %.0f%% · visible %.0f%% · thinking-only %.0f%% · silent %.0f%%"
+              % (fired, denies, reminders, 100.0 * loaded / fired, 100.0 * visible / fired,
                  100.0 * thinking / fired, 100.0 * (fired - loaded - visible - thinking) / fired))
     else:
         print("no suggestion events found (scanned %d file(s))" % len(files))
