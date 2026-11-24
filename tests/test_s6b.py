@@ -1,8 +1,8 @@
 SESSION_ID = "init"
 """§6b staged triggering: step 1 precision (worktree route skipped when the payload cwd is
 already a linked worktree — .git is a file) and step 2 visibility (the hook text demands a
-VISIBLE reply; a thinking-only decline does not count). The audit counts denies for the
-step-3 barrier gate."""
+VISIBLE reply; a thinking-only decline does not count). The audit counts reminders (and
+legacy denies) for the step-3 barrier gate; the barrier never denies a tool call."""
 import json
 import os
 from pathlib import Path
@@ -84,7 +84,7 @@ def test_audit_json_has_denies_field(tmp_path, monkeypatch, capsys):
     assert data["total_fired"] == 1
 
 
-# ---------------------------------------------------------------- §6b step 3: deny-once barrier
+# ---------------------------------------------------------------- §6b step 3: reminder barrier (never denies)
 
 def _write_transcript(tmp_path, records):
     tp = tmp_path / "t.jsonl"
@@ -116,20 +116,22 @@ def test_step3_prompt_hook_records_pending_barrier_state(tmp_path):
     _suggest_waypoints(tmp_path)
     st = ss._load_barrier(SESSION_ID)
     assert st.get("pending", {}).get("waypoints:waypoints") == "open-items"
-    assert st.get("denied") is False
+    assert st.get("reminders") == 0
 
 
-def test_step3_denies_once_then_fails_open(tmp_path):
+def test_step3_reminds_twice_then_silent(tmp_path):
     _, tp = _suggest_waypoints(tmp_path)
     ptool = {"session_id": SESSION_ID, "tool_name": "Bash",
              "tool_input": {"command": "ls"}, "transcript_path": tp}
     out1 = ss.hook_pretool(ptool)
-    d1 = json.loads(out1)
-    assert d1["hookSpecificOutput"]["permissionDecision"] == "deny"
-    reason = d1["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "summon-skills" in reason and "denied once" in reason and "waypoints" in reason
-    out2 = ss.hook_pretool(ptool)   # second call: fail OPEN
-    assert out2 == "", out2
+    out2 = ss.hook_pretool(ptool)
+    out3 = ss.hook_pretool(ptool)
+    for out in (out1, out2):
+        d = json.loads(out)
+        assert "permissionDecision" not in d["hookSpecificOutput"], d
+        ctx = d["hookSpecificOutput"]["additionalContext"]
+        assert "summon-skills reminder" in ctx and "waypoints" in ctx, ctx
+    assert out3 == "", out3   # third call on the same ignored batch goes silent
 
 
 def test_step3_skill_call_for_pending_skill_clears_and_allows(tmp_path):
@@ -169,26 +171,35 @@ def test_step3_visible_text_answer_allows_but_thinking_does_not(tmp_path):
     assert out2 != "", "thinking-only mention must NOT clear the barrier"
 
 
-def test_step3_no_transcript_fails_open_without_denying(tmp_path):
+def test_step3_no_transcript_fails_open_without_reminding(tmp_path):
     # A missing/unreadable transcript cannot prove load/answer either way -> the barrier
-    # must NOT deny (a hook never wrongly blocks); it just stays inert.
+    # must NOT block (a hook never wrongly blocks); it just stays inert.
     _suggest_waypoints(tmp_path)
     out = ss.hook_pretool({"session_id": SESSION_ID, "tool_name": "Bash",
                            "tool_input": {"command": "ls"}, "transcript_path": ""})
     assert out == "", out
 
 
-def test_step3_deny_claim_is_atomic(tmp_path):
-    # Two parallel hook processes must not both deny: the O_EXCL claim file arbitrates.
+def test_step3_reminder_claims_are_atomic(tmp_path):
+    # Two parallel hook processes must not both claim the same reminder slot:
+    # the O_EXCL claim files arbitrate.
     _, tp = _suggest_waypoints(tmp_path)
-    claim = ss._barrier_file(SESSION_ID).with_name(
-        ss._barrier_file(SESSION_ID).name.replace(
-            ".barrier.json", "." + ss._load_barrier(SESSION_ID)["batch"] + ".deny.json"))
-    claim.parent.mkdir(parents=True, exist_ok=True)
-    claim.touch()   # simulate the other process having claimed the deny first
-    out = ss.hook_pretool({"session_id": SESSION_ID, "tool_name": "Bash",
-                           "tool_input": {"command": "ls"}, "transcript_path": tp})
-    assert out == "", "an existing claim must fail open (once-only)"
+    batch = ss._load_barrier(SESSION_ID)["batch"]
+    stem = ss._barrier_file(SESSION_ID).name.replace(".barrier.json", "")
+    claim1 = ss._barrier_file(SESSION_ID).with_name("%s.%s.remind1.json" % (stem, batch))
+    claim1.parent.mkdir(parents=True, exist_ok=True)
+    claim1.touch()   # simulate the other process having claimed slot 1 first
+    ptool = {"session_id": SESSION_ID, "tool_name": "Bash",
+             "tool_input": {"command": "ls"}, "transcript_path": tp}
+    out = ss.hook_pretool(ptool)
+    d = json.loads(out)
+    assert "summon-skills reminder 2/%d" % ss.REMINDER_LIMIT in \
+        d["hookSpecificOutput"]["additionalContext"], d
+    assert "permissionDecision" not in d["hookSpecificOutput"], d
+    # plant slot 2 as well -> the next call goes silent
+    claim2 = ss._barrier_file(SESSION_ID).with_name("%s.%s.remind2.json" % (stem, batch))
+    claim2.touch()
+    assert ss.hook_pretool(ptool) == "", "both slots claimed -> silent (never blocks)"
 
 
 def test_step3_malformed_payload_never_blocks(tmp_path):
@@ -216,7 +227,9 @@ def test_step3_suggestion_line_in_transcript_does_not_clear_barrier(tmp_path):
     out = ss.hook_pretool({"session_id": SESSION_ID, "tool_name": "Bash",
                            "tool_input": {"command": "ls"}, "transcript_path": tp})
     assert out != "", "the hook's own suggestion line (user role) must NOT count as a visible answer"
-    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+    d = json.loads(out)
+    assert "permissionDecision" not in d["hookSpecificOutput"], d
+    assert "summon-skills reminder" in d["hookSpecificOutput"]["additionalContext"], d
 
 
 def test_step3_assistant_text_still_clears(tmp_path):

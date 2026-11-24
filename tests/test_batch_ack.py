@@ -28,20 +28,65 @@ def prompt(payload, skill):
     return ss.hook_prompt(dict(payload, prompt=skill))
 
 
-def test_each_real_prompt_batch_denies_once(setup):
+def test_each_real_prompt_batch_reminds_at_most_twice(setup):
+    prompt(setup, 'first:one')
+    out1 = ss.hook_pretool(setup)
+    out2 = ss.hook_pretool(setup)
+    out3 = ss.hook_pretool(setup)
+    for out in (out1, out2):
+        assert "summon-skills reminder" in out and "additionalContext" in out, out
+        assert "permissionDecision" not in out, out
+    assert out3 == "", out3   # third call on the same ignored batch goes silent
+
+
+def test_new_batch_resets_reminder_budget(setup):
     prompt(setup, 'first:one')
     assert ss.hook_pretool(setup)
-    assert not ss.hook_pretool(setup)
-    prompt(setup, 'second:two')
     assert ss.hook_pretool(setup)
-    assert not ss.hook_pretool(setup)
+    assert ss.hook_pretool(setup) == ""
+    prompt(setup, 'second:two')   # a new prompt batch gets its own reminder budget
+    out = ss.hook_pretool(setup)
+    assert "summon-skills reminder" in out and "permissionDecision" not in out, out
+    assert "summon-skills reminder" in ss.hook_pretool(setup)
+    assert ss.hook_pretool(setup) == ""
 
 
-def test_parallel_calls_deny_only_once(setup):
+def test_parallel_calls_never_exceed_two_reminders(setup):
     prompt(setup, 'first:one')
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(lambda _: ss.hook_pretool(setup), range(8)))
-    assert sum(bool(r) for r in results) == 1
+    non_empty = [r for r in results if r]
+    assert len(non_empty) == 2, results
+    for r in non_empty:
+        assert "summon-skills reminder" in r and "permissionDecision" not in r, r
+
+
+def test_pretool_never_emits_permission_decision(setup):
+    prompt(setup, 'first:one')
+    outs = [ss.hook_pretool(setup) for _ in range(4)]
+    prompt(setup, 'second:two')
+    outs += [ss.hook_pretool(setup) for _ in range(3)]
+    outs.append(ss.hook_pretool(dict(setup, tool_name='Skill',
+                                     tool_input={'skill': 'second:two'})))
+    for out in outs:
+        assert "permissionDecision" not in out, out
+
+
+def test_legacy_denied_state_never_denies(setup):
+    # legacy on-disk state: "denied": true plus an old .<batch>.deny.json claim file.
+    # It stays readable, never causes a deny, and the batch still gets at most 2 reminders.
+    ss._save_barrier('test', {'pending': {'old:skill': 'test'}, 'denied': True,
+                              'batch': 'legacybatch'}, new_batch=True)
+    claim = ss._barrier_file('test').with_name(
+        ss._barrier_file('test').name.replace('.barrier.json', '.legacybatch.deny.json'))
+    claim.parent.mkdir(parents=True, exist_ok=True)
+    claim.touch()
+    outs = [ss.hook_pretool(setup) for _ in range(3)]
+    assert "summon-skills reminder" in outs[0], outs[0]
+    assert "summon-skills reminder" in outs[1], outs[1]
+    assert outs[2] == "", outs[2]
+    for out in outs:
+        assert "deny" not in out, out
 
 
 def test_other_session_progresses_while_first_is_locked(setup, monkeypatch):
@@ -143,12 +188,6 @@ def test_old_call_finishes_before_new_prompt_updates_state(setup, monkeypatch):
         assert new.result(timeout=5)
     assert ss.hook_pretool(setup)
     assert ss._load_barrier('test')['pending'] == {'second:two': 'test'}
-
-
-def test_legacy_barrier_remains_readable(setup):
-    ss._save_barrier('test', {'pending': {'old:skill': 'test'}, 'denied': False})
-    assert ss.hook_pretool(setup)
-    assert not ss.hook_pretool(setup)
 
 
 def test_late_legacy_save_does_not_replace_new_batch(setup):

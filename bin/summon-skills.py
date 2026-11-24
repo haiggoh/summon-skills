@@ -36,6 +36,8 @@ def _manifest_version():
 VERSION = _manifest_version()
 SCHEMA = 1
 DEFAULT_MAX = 3
+REMINDER_LIMIT = 2          # user decision 2026-11-23: at most two visible reminders per
+                            # suggestion batch, then the hook goes silent — NEVER a deny
 SCAN_CHARS = 20000          # long pastes: only the head is scanned
 STATE_TTL = 2 * 86400       # per-session dedupe files older than this are pruned
 EXTRA_PATH = ["/opt/homebrew/bin", "/usr/local/bin", "~/.local/bin", "~/.cargo/bin",
@@ -638,6 +640,23 @@ def _save_barrier(session_id, st, new_batch=False):
     p.write_text(json.dumps(st), encoding="utf-8")
 
 
+def _claim_reminder(session_id, batch):
+    """Atomically claim reminder slot n (1..REMINDER_LIMIT) for this batch via O_EXCL
+    claim files; returns the claimed slot, or None when every slot is already taken.
+    Claim files keep the *.json suffix so prune_sessions' TTL glob covers them."""
+    stem = _barrier_file(session_id).name.replace(".barrier.json", "")
+    for n in range(1, REMINDER_LIMIT + 1):
+        claim = _barrier_file(session_id).with_name(
+            "%s.%s.remind%d.json" % (stem, batch or "legacy", n))
+        try:
+            fd = os.open(str(claim), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            return n
+        except FileExistsError:
+            continue
+    return None
+
+
 @contextmanager
 def _session_lock(session_id):
     # Directory lock protects opening/removing lockfiles, never transcript processing.
@@ -849,9 +868,10 @@ def _hook_prompt(payload):
     shown.update("lsp:" + n.split(" ", 1)[0] for n in notes)
     save_shown(session_id, shown)
     if skills:
-        # §6b step 3: record the pending suggestions for the PreToolUse deny-once barrier.
-        # Each new suggestion set gets a fresh denied flag (one deny per suggestion batch).
-        _save_barrier(session_id, {"pending": {s: r for s, r in skills}, "denied": False,
+        # §6b step 3: record the pending suggestions for the PreToolUse reminder barrier.
+        # Each new suggestion set gets a fresh reminders counter (at most REMINDER_LIMIT
+        # reminders per suggestion batch; the hook NEVER denies a tool call).
+        _save_barrier(session_id, {"pending": {s: r for s, r in skills}, "reminders": 0,
                                    "batch": uuid.uuid4().hex}, new_batch=True)
     parts = []
     if skills:
@@ -865,12 +885,13 @@ def _hook_prompt(payload):
 
 
 def hook_pretool(payload):
-    """§6b step 3 — deny ONCE the first non-Skill tool call after a suggestion that was
-    neither loaded (Skill tool_use) nor answered in visible text (assistant text naming it;
-    thinking doesn't count). Then fail OPEN. Skill calls themselves are exempt. The deny
-    reason carries "summon-skills" + "denied once" so `audit` counts barrier denials.
-    Never raises, never wrongly blocks: any error — or a missing/unreadable transcript, from
-    which an answer cannot be proven either way — returns '' (allow)."""
+    """§6b step 3 — REMIND (never block) on the first non-Skill tool calls after a suggestion
+    that was neither loaded (Skill tool_use) nor answered in visible text (assistant text
+    naming it; thinking doesn't count). At most REMINDER_LIMIT numbered O_EXCL reminder
+    claims per suggestion batch; after that the hook goes silent and fails OPEN. Skill calls
+    themselves are exempt. The reminder text carries "summon-skills reminder" so `audit`
+    counts reminders. Never raises, never blocks: any error — or a missing/unreadable
+    transcript, from which an answer cannot be proven either way — returns '' (allow)."""
     try:
         with _session_lock(payload.get("session_id") or "nosession"):
             return _hook_pretool(payload)
@@ -898,7 +919,7 @@ def _hook_pretool(payload):
         return ""
     tp = (payload.get("transcript_path") or "").strip()
     if not tp or not os.path.isfile(tp):
-        return ""  # cannot prove load/answer either way -> fail open WITHOUT denying
+        return ""  # cannot prove load/answer either way -> fail open WITHOUT reminding
     loaded = _loaded_skills_from_transcript(payload)
     visible = _visible_mentions(payload, pending)
     for sk in list(pending):
@@ -908,32 +929,25 @@ def _hook_pretool(payload):
         st["pending"] = {}
         _save_barrier(session_id, st)
         return ""
-    # Deny at most once per suggestion batch — claimed ATOMICALLY: two parallel tool calls
-    # in one block run two hook processes; a plain read-modify-write of a flag can let both
-    # read denied=false and both deny. The O_EXCL claim file is the single-writer arbiter;
-    # named *.json so prune_sessions' TTL glob covers it.
-    claim = _barrier_file(session_id).with_name(
-        _barrier_file(session_id).name.replace(".barrier.json",
-            "." + st["batch"] + ".deny.json" if st.get("batch") else ".deny.json"))
-    try:
-        fd = os.open(str(claim), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.close(fd)
-    except FileExistsError:
-        return ""  # already denied once for this batch -> fail open
+    # Remind at most REMINDER_LIMIT times per suggestion batch — claimed ATOMICALLY: two
+    # parallel tool calls in one block run two hook processes; a plain read-modify-write of
+    # a counter can let both read reminders=0 and both remind. The O_EXCL claim files are
+    # the single-writer arbiter; named *.json so prune_sessions' TTL glob covers them.
+    n = _claim_reminder(session_id, st.get("batch"))
+    if n is None:
+        return ""  # all reminder slots taken for this batch -> go silent (fail open)
     skill = next(iter(pending))
-    st["denied"] = True
+    st["reminders"] = n
     try:
         _save_barrier(session_id, st)
     except OSError:
-        pass  # the claim file already guarantees the once-only invariant
+        pass  # the claim file already guarantees the at-most-two invariant
     return json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
-        "permissionDecision": "deny",
-        "permissionDecisionReason": (
-            "summon-skills: '%s' was suggested for this task and is neither loaded nor "
-            "answered in your visible reply — this call is denied once. Invoke the skill "
-            "(or say in your visible reply why not), then re-issue this call; the barrier "
-            "fails open after one deny." % skill)}})
+        "additionalContext": (
+            "summon-skills reminder %d/%d: '%s' was suggested for this task and is neither "
+            "loaded nor answered in your visible reply. Invoke it, or say in your visible "
+            "reply why not. This call was NOT blocked." % (n, REMINDER_LIMIT, skill))}})
 
 
 def hook_session_start(payload):
