@@ -6,7 +6,10 @@ read. The installed-skill index is rebuilt only when its fingerprint changes.
 Python 3.9 compatible (hooks may run under macOS /usr/bin/python3).
 """
 import argparse
-import fcntl
+try:
+    import fcntl
+except ImportError:  # Other CLI commands remain usable on hosts without flock.
+    fcntl = None
 import glob
 import hashlib
 import json
@@ -636,17 +639,45 @@ def _save_barrier(session_id, st, new_batch=False):
 
 
 @contextmanager
-def _session_lock():
-    # Lock the directory itself: no separate lockfile can be unlinked by TTL cleanup.
+def _session_lock(session_id):
+    # Directory lock protects opening/removing lockfiles, never transcript processing.
+    if fcntl is None:
+        raise RuntimeError("session locking unavailable")
     directory = session_dir()
     directory.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(directory), os.O_RDONLY)
+    guard = os.open(str(directory), os.O_RDONLY)
+    fd = None
+    deadline = time.monotonic() + 1.0
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        while True:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("session lock timed out")
+            try:
+                fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                time.sleep(0.01)
+                continue
+            try:
+                lock = directory / (_state_file(session_id).stem + ".lock")
+                fd = os.open(str(lock), os.O_CREAT | os.O_RDWR, 0o600)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    os.close(fd)
+                    fd = None
+                if fd is not None:
+                    os.utime(lock, None)
+            finally:
+                fcntl.flock(guard, fcntl.LOCK_UN)
+            if fd is not None:
+                break
+            time.sleep(0.01)
         yield
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
+        if fd is not None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        os.close(guard)
 
 
 def _is_compact_boundary(rec):
@@ -755,6 +786,30 @@ def prune_sessions(now=None):
                 path.unlink()
         except OSError:
             pass
+    # Keep the directory lock while opening/unlinking, so no caller can lock an
+    # unlinked inode while another caller creates a replacement for the same ID.
+    if fcntl is None or not session_dir().is_dir():
+        return
+    guard = os.open(str(session_dir()), os.O_RDONLY)
+    try:
+        try:
+            fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        for path in session_dir().glob("*.lock"):
+            try:
+                if now - path.stat().st_mtime <= STATE_TTL:
+                    continue
+                fd = os.open(str(path), os.O_RDWR)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    path.unlink()
+                finally:
+                    os.close(fd)
+            except OSError:
+                pass
+    finally:
+        os.close(guard)
 
 
 # ---------------------------------------------------------------- hooks
@@ -776,7 +831,7 @@ def _cwd_is_linked_worktree(payload):
 
 def hook_prompt(payload):
     """Return the one-line nudge for this prompt, or '' when nothing new matches."""
-    with _session_lock():
+    with _session_lock(payload.get("session_id") or "nosession"):
         return _hook_prompt(payload)
 
 
@@ -817,7 +872,7 @@ def hook_pretool(payload):
     Never raises, never wrongly blocks: any error — or a missing/unreadable transcript, from
     which an answer cannot be proven either way — returns '' (allow)."""
     try:
-        with _session_lock():
+        with _session_lock(payload.get("session_id") or "nosession"):
             return _hook_pretool(payload)
     except Exception:
         return ""  # fail open: a hook must never wrongly block on a bug
