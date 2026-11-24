@@ -2,7 +2,9 @@
 
 ## [0.2.6] — 2026-11-21
 
-- Keep deny-once claims separate for each suggestion batch, including concurrent and late hook calls.
+### Changed — the PreToolUse barrier no longer denies any tool call; an unanswered suggestion now gets at most two non-blocking reminders per batch (user decision 2026-11-23: zero denials). The reminders are emitted as `hookSpecificOutput.additionalContext` on both Claude Code and Codex, so the call always proceeds; after the second reminder the hook goes silent. `audit --json` gains a `reminders` field; `denies` is kept and now counts only legacy "denied once" lines.
+
+- Keep reminder claims separate for each suggestion batch, including concurrent and late hook calls (numbered O_EXCL claim files, at most two per batch).
 - Match visible skill acknowledgements by complete names; ambiguous short names no longer clear another skill.
 
 ## [0.2.5] — 2026-11-19
