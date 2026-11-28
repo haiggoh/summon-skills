@@ -112,6 +112,40 @@ planning prompts that must yield offload. `replay` reports per release: false po
 relevant hits lost (must be 0 on labelled positives), mean suggestions per prompt. A post-ship
 `audit --since-days 1` is the dogfood read (ignored % and declined % vs the 0.2.6 baseline).
 
+## 6b. Builder-check resolutions (2026-11-28; check by Gemini 3.8 Flash, free dispatch)
+
+User approved the design and delegated these calls to the run ("builder-check calls are yours").
+All are *[call]* unless noted.
+
+- **Shipped in 0.2.7 (supersedes §4.1/4.2 wording):** `local-offload` → `free-agents:offload`;
+  `execution-plan-layer` → `lasting-plans:plan-airtight`; `merge-conflict` route **removed** (no live
+  target). Two separate routes, `plan-offload` and `free-handover` (a route yields only its first
+  installed skill). The guard is a **runtime** check, not a source-checkout test:
+  `stale_route_targets()` (plugin enabled, skill gone) is named on the SessionStart line — CI-safe.
+- **Declines vs `shown` (Q1):** `shown` keeps suppressing re-suggestion within a session, so a
+  per-session decline factor would be dead code — **dropped**. A visible decline instead counts
+  0.5 toward long-run habit, and suppresses the same skill's tool-output trigger (0.4.0) for the session.
+- **Decline detection with no tool calls (Q2):** `_hook_prompt` scans the transcript once for
+  visible mentions of the PREVIOUS batch's pending skills before scoring; decisions are recorded in
+  the existing per-session state file under a new `declined` key (additive; `shown` key unchanged).
+- **Deferred reminder lifecycle (Q3):** the counter spans prompts; a new suggestion batch does NOT
+  reset deferred entries; an entry expires after it reminds once, after 20 tool calls, or at the next
+  compact_boundary. Shares REMINDER_LIMIT with ordinary reminders.
+- **Regression fixture `context` (Q5):** `{"turns": int, "known": [skill], "uses": {skill: float}}`,
+  all optional; `suggest()` gains `ctx=None` (keyword-only, default reproduces today's behaviour so
+  every existing caller and pinned test is unchanged); `cmd_replay` passes it through.
+- **`knowledge` map (Q7):** a new top-level `"knowledge": {skill: {"scripts": [basename…],
+  "banner": regex}}` in routes.json — `skills` lists stay strings. Auto-derivation: a Bash command
+  running an executable from a plugin's `bin/`/`scripts/` marks known ONLY the skill whose short
+  name equals the plugin name (e.g. `waypoints:waypoints`); other skills need an explicit entry.
+- **Fractional uses (Q8):** `familiarity.json` = `{skill: {session_id: [date, weight]}}`, weight 1.0
+  (load/script) or 0.5 (visible decline); `uses = sum(weights)` over the last 30 days.
+- **0.4.0 hook surface (Q9):** PostToolUse (Bash) matches `on_output`; PreToolUse additionally
+  matches `on_command`. Both reply with `hookSpecificOutput.additionalContext` (hookEventName
+  set accordingly), never a decision field — builder verifies the PostToolUse payload/response shape
+  against current Claude Code hook docs before writing the matcher. The conflict-marker seed ships
+  only if an installed target skill exists; otherwise it is omitted.
+
 ## 7. Left to the builder
 
 Exact regexes and word lists; where in `_hook_prompt` the scoring slots in (replace the

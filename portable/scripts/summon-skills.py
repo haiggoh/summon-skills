@@ -986,11 +986,23 @@ def hook_session_start(payload):
         marker.write_text(str(len(unrouted)))
     except OSError:
         pass
+    stale = stale_route_targets(routes, index)
+    if stale:
+        line += "\n💡 summon-skills: %d stale route target(s) -- plugin installed, skill gone: %s" \
+                " (fix rules/routes.json in the summon-skills source)" % (len(stale), ", ".join(stale))
     inert = inert_plugins(index)
     if inert:
         line += "\n💡 summon-skills: " + "; ".join(describe_inert(p) for p in inert) + \
                 " -- tell the user once; installing is their call."
     return line
+
+
+def stale_route_targets(routes, index):
+    """Route skills whose plugin IS enabled but no longer ships that skill: a rename upstream
+    leaves the route silently dead (2026-11-28: three such routes, e.g. offload-to-local)."""
+    plugins, installed = set(index.get("plugins", [])), index.get("skills", {})
+    return sorted(s for s in mentioned_skills(routes)
+                  if ":" in s and s.split(":", 1)[0] in plugins and s not in installed)
 
 
 def unrouted_skills(routes, index):

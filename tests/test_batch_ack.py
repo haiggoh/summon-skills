@@ -202,7 +202,8 @@ def test_no_flock_keeps_cli_usable_and_hooks_fail_open(setup, monkeypatch, capsy
     with pytest.raises(SystemExit) as result:
         ss.main(['--version'])
     assert result.value.code == 0
-    assert capsys.readouterr().out.strip() == '0.2.6'
+    manifest = json.loads((ROOT / '.claude-plugin/plugin.json').read_text())
+    assert capsys.readouterr().out.strip() == manifest['version']
     assert ss.hook_pretool(setup) == ''
 
 

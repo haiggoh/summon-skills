@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.7] — 2026-11-28
+
+### Fixed — three routes were silently dead because the skill they named had been renamed or removed: `local-offload` now points at `free-agents:offload` (was `offload-to-local`), `execution-plan-layer` at `lasting-plans:plan-airtight` (was `run-to-completion:writing-execution-plans`), and the `merge-conflict` route is removed (mattpocock-skills 1.3.x no longer ships `resolving-merge-conflicts` as a skill).
+
+- New guard: the SessionStart line names any **stale route target** — a route skill whose plugin is enabled but no longer ships it — so a future rename shows up the next session instead of going quiet.
+- New `plan-offload` route: planning and decomposition prompts ("write a plan", "break this down", "multi-step") also suggest `free-agents:offload`; new `free-handover` route: handoff/successor/overnight prompts suggest `free-agents:free-session-handover`.
+- Design for the next two releases (familiarity ranking, mid-task dampers, tool-output triggers): `docs/superpowers/specs/2026-11-28-contextual-triggering-design.md`.
+
 ## [0.2.6] — 2026-11-24
 
 ### Changed — the PreToolUse barrier no longer denies any tool call; an unanswered suggestion now gets at most two non-blocking reminders per batch (user decision 2026-11-23: zero denials). The reminders are emitted as `hookSpecificOutput.additionalContext` on both Claude Code and Codex, so the call always proceeds; after the second reminder the hook goes silent. `audit --json` gains a `reminders` field; `denies` is kept and now counts only legacy "denied once" lines.

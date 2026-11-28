@@ -321,11 +321,11 @@ def test_negative_matches(home, prompt, unexpected):
 def test_execution_plan_pairs_layer_with_base(home, prompt):
     # The layer is ADDITIVE: a route picks only its first installed skill, so the pairing needs the
     # base planning route AND the layer route to fire on the same handoff-shaped prompt.
-    home.plugin("run-to-completion", ["writing-execution-plans"])
+    home.plugin("lasting-plans", ["plan-airtight"])
     home.sync()
     got = names(prompt)
     assert "superpowers:writing-plans" in got
-    assert "run-to-completion:writing-execution-plans" in got
+    assert "lasting-plans:plan-airtight" in got
 
 
 @pytest.mark.parametrize("prompt", [
@@ -334,9 +334,9 @@ def test_execution_plan_pairs_layer_with_base(home, prompt):
     "hand off the keys to the new admin",
 ])
 def test_execution_plan_layer_not_on_plain_planning(home, prompt):
-    home.plugin("run-to-completion", ["writing-execution-plans"])
+    home.plugin("lasting-plans", ["plan-airtight"])
     home.sync()
-    assert "run-to-completion:writing-execution-plans" not in names(prompt)
+    assert "lasting-plans:plan-airtight" not in names(prompt)
 
 
 def test_process_before_domain_and_cap(home):
@@ -431,7 +431,8 @@ def test_lsp_silent_when_binary_present(home, monkeypatch):
     assert "inert" not in run_hook("prompt", {"session_id": "p", "prompt": "edit main.py"})[1]
 
 
-def test_session_start_line(home):
+def test_session_start_line(home, monkeypatch):
+    monkeypatch.setattr(ss, "stale_route_targets", lambda *a: [])  # stub plugins are partial
     code, out = run_hook("session", {})
     assert code == 0 and out.startswith("summon-skills:") and len(out) <= 200
 
@@ -439,6 +440,7 @@ def test_session_start_line(home):
 def test_session_start_unrouted_note_stays_on_status_line(home, monkeypatch):
     _declare(home, "pyright-lsp", mkt_entry={"lspServers": {"pyright": {"command": "pyright-langserver"}}})
     monkeypatch.setattr(ss, "find_binary", lambda name: None)
+    monkeypatch.setattr(ss, "stale_route_targets", lambda *a: [])  # stub plugins are partial
     run_hook("session", {})                                   # records the baseline unrouted count
     home.plugin("extra", ["brand-new"])
     home.sync()
@@ -566,3 +568,52 @@ def test_reindex_command_rebuilds_and_releases_the_lock(home):
     assert ss.main(["reindex"]) == 0
     assert "newcomer:fresh-skill" in ss._load_json(ss.state_home() / "index.json", {})["skills"]
     assert not (ss.state_home() / "reindex.lock").exists()
+
+
+# ---------------------------------------------------------------- stale route targets (0.2.7)
+def _routes_file(tmp_path, monkeypatch, routes):
+    p = tmp_path / "routes.json"
+    p.write_text(json.dumps({"schema": 1, "routes": routes}))
+    monkeypatch.setenv("SUMMON_SKILLS_ROUTES", str(p))
+
+
+def test_stale_route_targets_names_installed_plugin_missing_skill(home, tmp_path, monkeypatch):
+    _routes_file(tmp_path, monkeypatch, [
+        {"id": "renamed", "match": {"words": ["x"]}, "skills": ["superpowers:gone-skill"]},
+        {"id": "absent", "match": {"words": ["y"]}, "skills": ["not-installed:anything"]},
+        {"id": "live", "match": {"words": ["z"]}, "skills": ["superpowers:brainstorming"]}])
+    routes, _ = ss.load_routes()
+    assert ss.stale_route_targets(routes, ss.load_index(force=True)) == ["superpowers:gone-skill"]
+
+
+def test_session_start_line_names_stale_route_targets(home, tmp_path, monkeypatch):
+    _routes_file(tmp_path, monkeypatch, [
+        {"id": "renamed", "match": {"words": ["x"]}, "skills": ["superpowers:gone-skill"]}])
+    line = run_hook("session", {})[1]
+    assert "stale route target" in line and "superpowers:gone-skill" in line
+
+
+def test_shipped_routes_have_no_stale_targets_for_their_live_names(home):
+    """The three renames found 2026-11-28 point at the CURRENT skill names."""
+    routes = {r["id"]: r["skills"] for r in json.loads((ROOT / "rules" / "routes.json").read_text())["routes"]}
+    assert routes["local-offload"] == ["free-agents:offload"]
+    assert routes["execution-plan-layer"] == ["lasting-plans:plan-airtight"]
+
+
+@pytest.mark.parametrize("prompt", [
+    "write a plan for the multi-step refactor",
+    "break this task down into steps before we start",
+    "decompose the migration into phases"])
+def test_planning_prompts_suggest_offload(home, prompt):
+    home.plugin("free-agents", ["offload", "free-session-handover"])
+    home.sync()
+    out = run_hook("prompt", {"prompt": prompt, "session_id": "s-%d" % abs(hash(prompt))})[1]
+    assert "free-agents:offload" in out
+
+
+def test_handoff_prompt_suggests_free_session_handover(home):
+    home.plugin("free-agents", ["offload", "free-session-handover"])
+    home.sync()
+    out = run_hook("prompt", {"prompt": "hand this over to a successor session overnight",
+                              "session_id": "s-handover"})[1]
+    assert "free-agents:free-session-handover" in out
