@@ -110,6 +110,8 @@ def test_suggest_ctx_none_is_identity(home):
         p = row.get("prompt") or ""
         base = ss.suggest(p, routes, index, (), ss.DEFAULT_MAX)
         assert ss.suggest(p, routes, index, (), ss.DEFAULT_MAX, ctx=None) == base
+        # an empty ctx must behave exactly like no ctx (dampers read optional keys only)
+        assert ss.suggest(p, routes, index, (), ss.DEFAULT_MAX, ctx={}) == base
         out = ss.suggest(p, routes, index, (), ss.DEFAULT_MAX,
                          ctx={"turns": 3, "known": ["x:y"], "uses": {"x:y": 2.0}})
         assert isinstance(out, tuple) and isinstance(out[0], list)
@@ -121,13 +123,16 @@ def test_replay_reports_violations(tmp_path, home, capsys):
                                   "expect_any": ["superpowers:systematic-debugging"]}) + "\n"
                       + json.dumps({"prompt": "gardening question about tomato plants",
                                     "expect_any": ["superpowers:systematic-debugging"],
-                                    "expect_none": ["superpowers:brainstorming"]}) + "\n",
+                                    "expect_none": ["superpowers:brainstorming"]}) + "\n"
+                      + json.dumps({"prompt": "review my changes in the diff",
+                                    "expect_any": ["code-review", "superpowers:requesting-code-review"]}) + "\n",
                       encoding="utf-8")
     rc = ss.main(["replay", str(corpus), "--json"])
     out = capsys.readouterr().out
     assert rc == 1, out
     data = json.loads(out)
-    assert data["lines"] == 2
+    assert data["lines"] == 3
+    # multi-element expect_any is satisfied when ONE element fires -> still exactly 1 violation
     assert len(data["violations"]) == 1, data
     v = data["violations"][0]
     assert v["missing"] == ["superpowers:systematic-debugging"]
