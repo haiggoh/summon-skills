@@ -355,7 +355,8 @@ def _phrase_re(phrase):
 
 
 def compile_route(route):
-    """Attach a compiled `_re` (match) and `_ex` (exclude); raises re.error on bad input."""
+    """Attach compiled `_re` (match), `_re_rx` (regex/ext only, for route_strength),
+    `_intent_re` (authoring gate) and `_ex` (exclude); raises re.error on bad input."""
     m = route.get("match", {})
     parts = [_phrase_re(w) for w in m.get("words", [])]
     parts += ["(?:%s)" % r for r in m.get("regex", [])]
@@ -364,6 +365,14 @@ def compile_route(route):
     # cheap pre-check: a words-only route cannot match unless one word occurs as a substring
     route["_needles"] = None if (m.get("regex") or m.get("ext")) else \
         [w.lower() for w in m.get("words", [])]
+    rx = ["(?:%s)" % r for r in m.get("regex", [])]
+    rx += [r"\.%s\b" % re.escape(e.lstrip(".")) for e in m.get("ext", [])]
+    route["_re_rx"] = re.compile("|".join(rx), re.I) if rx else None
+    intent = route.get("intent")
+    if isinstance(intent, list) and intent:
+        route["_intent_re"] = re.compile("|".join("(?:%s)" % r for r in intent), re.I)
+    else:
+        route["_intent_re"] = None
     ex = [_phrase_re(w) for w in route.get("exclude", [])]
     route["_ex"] = re.compile("|".join(ex), re.I) if ex else None
     return route
@@ -413,31 +422,109 @@ def matching_routes(text, routes):
             continue
         if route["_re"] is None or not route["_re"].search(text):
             continue
+        irx = route.get("_intent_re")
+        if irx is not None and not irx.search(text):
+            continue          # authoring route: a bare domain word is not an authoring intent
         if route["_ex"] is not None and route["_ex"].search(text):
             continue
         hits.append(route)
     return hits
 
 
-def suggest(text, routes, index, shown=(), cap=DEFAULT_MAX, *, ctx=None):
-    """Return (skills, notes): skills=[(skill, route_id)] process-first, capped, deduped.
+def route_strength(route, text):
+    """1.0 when a regex/ext or intent pattern matched, 0.7 for a words-only match;
+    +0.1 for process routes so process-first ordering survives equal scores."""
+    s = 1.0 if (route.get("_re_rx") is not None and route["_re_rx"].search(text)) else 0.7
+    irx = route.get("_intent_re")
+    if irx is not None and irx.search(text):
+        s = 1.0
+    if route.get("kind") == "process":
+        s += 0.1
+    return s
 
-    ctx (0.3.0): None or a dict with optional keys "turns" (int), "known" ([skill]),
-    "uses" ({skill: float}). ctx=None MUST reproduce 0.2.7 output exactly (pinned by
-    test_suggest_ctx_none_is_identity); the dampers that read it land in later tasks."""
+
+_DOC_HEAD_RE = re.compile(r"Read\s+\S+\s+first")
+
+
+def _scan_text(text):
+    """Document mode: a pasted document (starts with '#', a 'Read <path> first' line, or
+    > 1500 chars) is matched on its first line + first 600 chars only."""
+    if text.startswith("#") or _DOC_HEAD_RE.match(text) or len(text) > 1500:
+        return text.split("\n", 1)[0] + "\n" + text[:600]
+    return text
+
+
+def _literal_named(skill, text):
+    """The prompt naming a skill literally (its short name, its plugin name as a whole
+    word, or /name) means it is already in play — that skill must not take a slot."""
+    if ":" in skill:
+        plugin, short = skill.split(":", 1)
+    else:
+        plugin, short = "", skill
+    if re.search(r"(?<![\w-])" + re.escape(short) + r"(?![\w-])", text, re.I):
+        return True
+    if plugin and re.search(r"(?<![\w-])" + re.escape(plugin) + r"(?![\w-])", text, re.I):
+        return True
+    return bool(re.search(r"/" + re.escape(short) + r"(?![\w-])", text, re.I))
+
+
+def suggest(text, routes, index, shown=(), cap=DEFAULT_MAX, *, ctx=None):
+    """Return (skills, notes): skills=[(skill, route_id)] capped, deduped.
+
+    ctx=None reproduces 0.2.7 exactly (pinned by test_suggest_ctx_none_is_identity).
+    A dict ctx (optional keys "turns", "known", "uses") activates the 0.3.0 dampers:
+    known skills drop out, literal names take no slot, document mode scans the head
+    only, short replies get cap 1 with strength >= 1.0 only, and ranking scores
+    strength x habit_weight(uses[skill]), stable by route file order."""
     installed = index.get("skills", {})
     plugins = set(index.get("plugins", []))
-    picked, notes, seen = [], [], set(shown)
-    hits = matching_routes(text, routes)
-    hits.sort(key=lambda r: 0 if r.get("kind") == "process" else 1)
-    for route in hits:
+    if ctx is None:
+        picked, notes, seen = [], [], set(shown)
+        hits = matching_routes(text, routes)
+        hits.sort(key=lambda r: 0 if r.get("kind") == "process" else 1)
+        for route in hits:
+            for skill in route.get("skills", []):
+                info = installed.get(skill) or (
+                    {"invocable": True} if skill in route.get("_builtin", ()) else None)
+                if info and info.get("invocable"):
+                    if skill not in seen:
+                        picked.append((skill, route["id"]))
+                        seen.add(skill)
+                    break
+            lsp = route.get("lsp")
+            key = "lsp:%s" % (lsp or {}).get("plugin")
+            if lsp and lsp.get("plugin") in plugins and key not in seen:
+                dep = index.get("deps", {}).get(lsp["plugin"])
+                if dep:
+                    problems = inert_plugins({"deps": {lsp["plugin"]: dep}})
+                    if problems:
+                        notes.append(describe_inert(problems[0]))
+                seen.add(key)
+        return picked[:cap], notes
+    ctxd = ctx if isinstance(ctx, dict) else {}
+    known = set(ctxd.get("known") or [])
+    uses = ctxd.get("uses") if isinstance(ctxd.get("uses"), dict) else {}
+    turns = ctxd.get("turns") or 0
+    scan = _scan_text(text)
+    short_reply = bool(turns) and len(text.split()) < 15
+    if short_reply:
+        cap = min(cap, 1)
+    hits = matching_routes(scan, routes)
+    seen = set(shown) | known
+    scored, notes = [], []
+    for order, route in enumerate(hits):
+        strength = route_strength(route, scan)
+        if short_reply and strength < 1.0:
+            continue
         for skill in route.get("skills", []):
             info = installed.get(skill) or (
                 {"invocable": True} if skill in route.get("_builtin", ()) else None)
             if info and info.get("invocable"):
-                if skill not in seen:
-                    picked.append((skill, route["id"]))
-                    seen.add(skill)
+                # a route suggests only its FIRST installed skill — if that one is seen
+                # or literal-named, the route contributes nothing (0.2.7 break semantics)
+                if skill not in seen and not _literal_named(skill, scan):
+                    w = habit_weight(float(uses.get(skill, 0.0)))
+                    scored.append((-strength * w, order, skill, route["id"]))
                 break
         lsp = route.get("lsp")
         key = "lsp:%s" % (lsp or {}).get("plugin")
@@ -448,7 +535,15 @@ def suggest(text, routes, index, shown=(), cap=DEFAULT_MAX, *, ctx=None):
                 if problems:
                     notes.append(describe_inert(problems[0]))
             seen.add(key)
-    return picked[:cap], notes
+    scored.sort(key=lambda t: (t[0], t[1]))     # stable: (-score, route file order)
+    picked = []
+    for _neg, _order, skill, rid in scored:
+        if skill not in seen:
+            picked.append((skill, rid))
+            seen.add(skill)
+        if len(picked) >= cap:
+            break
+    return picked, notes
 
 
 def mentioned_skills(routes):
@@ -600,7 +695,9 @@ def cmd_replay(args):
                     continue
                 rec = json.loads(ln)
                 prompt = rec.get("prompt") or ""
-                ctx = rec.get("context") if isinstance(rec.get("context"), dict) else None
+                # a dict ctx activates the dampers; rows without context get {} so the
+                # BEFORE/AFTER replay measures the dampers on every row (ledger ruling)
+                ctx = rec.get("context") if isinstance(rec.get("context"), dict) else {}
                 # the prompt hook folds known skills into `shown`; replay mirrors that
                 shown = set((ctx or {}).get("known") or [])
                 skills, _notes = suggest(prompt, routes, index, shown=shown, cap=DEFAULT_MAX,
@@ -914,6 +1011,8 @@ def _scan_known_file(tp, by_basename, banners):
                     rec = json.loads(line)
                 except ValueError:
                     rec = None
+                if not isinstance(rec, dict):   # "[1,2]", '"hello"' parse but are not records
+                    rec = None
                 if rec is not None and _is_compact_boundary(rec):
                     known = set()
                 # real transcripts store emoji both raw and \\u-escaped (verified 2026-11-28):
@@ -926,7 +1025,8 @@ def _scan_known_file(tp, by_basename, banners):
                         known.add(skill)
                 if rec is None:
                     continue
-                for block in (rec.get("message") or {}).get("content") or []:
+                msg = rec.get("message")
+                for block in (msg.get("content") if isinstance(msg, dict) else None) or []:
                     if not isinstance(block, dict) or block.get("type") != "tool_use":
                         continue
                     inp = block.get("input") or {}
@@ -1138,6 +1238,33 @@ def hook_prompt(payload):
         return _hook_prompt(payload)
 
 
+def _assistant_turns(payload):
+    """Count assistant turns in the transcript tail (short-reply mode needs >= 1)."""
+    tp = (payload.get("transcript_path") or "").strip() if isinstance(payload, dict) else ""
+    if not tp or not os.path.isfile(tp):
+        return 0
+    n = 0
+    try:
+        size = os.path.getsize(tp)
+        with open(tp, "rb") as fh:
+            if size > SCAN_TAIL_BYTES:
+                fh.seek(size - SCAN_TAIL_BYTES)
+                fh.readline()
+            for raw in fh:
+                line = raw.decode("utf-8", errors="replace")
+                if '"assistant"' not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict) and (rec.get("message") or {}).get("role") == "assistant":
+                    n += 1
+    except OSError:
+        return 0
+    return n
+
+
 def _hook_prompt(payload):
     session_id = payload.get("session_id") or "nosession"
     routes, _ = load_routes()
@@ -1146,8 +1273,8 @@ def _hook_prompt(payload):
     index = load_index(stale_ok=True)
     known = known_skills(payload, routes, index)
     shown = load_shown(session_id) | known
-    skills, notes = suggest(payload.get("prompt") or "", routes, index, shown, _cap(),
-                            ctx={"known": sorted(known)})
+    ctx = {"known": sorted(known), "uses": familiarity_uses(), "turns": _assistant_turns(payload)}
+    skills, notes = suggest(payload.get("prompt") or "", routes, index, shown, _cap(), ctx=ctx)
     if not skills and not notes:
         return ""
     shown.update(s for s, _ in skills)
@@ -1207,12 +1334,17 @@ def _hook_pretool(payload):
     if not tp or not os.path.isfile(tp):
         return ""  # cannot prove load/answer either way -> fail open WITHOUT reminding
     loaded = _loaded_skills_from_transcript(payload)
-    routes, _ = load_routes()
-    known = known_skills(payload, routes, load_index(stale_ok=True))
     visible = _visible_mentions(payload, pending)
     for sk in list(pending):
-        if sk in loaded or sk in visible or sk in known:
+        if sk in loaded or sk in visible:
             pending.pop(sk)
+    if pending:
+        # lazy: the script/banner scan only runs when something is still pending
+        routes, _ = load_routes()
+        known = known_skills(payload, routes, load_index(stale_ok=True))
+        for sk in list(pending):
+            if sk in known:
+                pending.pop(sk)
     if not pending:
         st["pending"] = {}
         _save_barrier(session_id, st)

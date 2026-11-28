@@ -110,8 +110,8 @@ def test_suggest_ctx_none_is_identity(home):
         p = row.get("prompt") or ""
         base = ss.suggest(p, routes, index, (), ss.DEFAULT_MAX)
         assert ss.suggest(p, routes, index, (), ss.DEFAULT_MAX, ctx=None) == base
-        # an empty ctx must behave exactly like no ctx (dampers read optional keys only)
-        assert ss.suggest(p, routes, index, (), ss.DEFAULT_MAX, ctx={}) == base
+        # NOTE: ctx={} is NOT identical to None from Task 4 on — an empty dict activates
+        # the dampers (document mode etc.), so replay passes {} for context-less rows.
         out = ss.suggest(p, routes, index, (), ss.DEFAULT_MAX,
                          ctx={"turns": 3, "known": ["x:y"], "uses": {"x:y": 2.0}})
         assert isinstance(out, tuple) and isinstance(out[0], list)

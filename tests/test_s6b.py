@@ -58,7 +58,7 @@ def test_worktree_route_skipped_when_cwd_is_linked_worktree(tmp_path):
 
 
 def test_hook_text_demands_visible_reply():
-    out = ss.hook_prompt(_payload(ROOT, "waypoints list"))
+    out = ss.hook_prompt(_payload(ROOT, "remind me to water the plants"))
     assert "VISIBLE reply" in out and "thinking-only doesn't count" in out, out
 
 
@@ -132,7 +132,7 @@ def _suggest_waypoints(tmp_path):
     tp = _write_transcript(tmp_path, [{"type": "user", "message": {"role": "user", "content": [
         {"type": "text", "text": "prompt"}]}}])
     out = ss.hook_prompt({"session_id": SESSION_ID, "cwd": str(tmp_path),
-                          "prompt": "waypoints list", "transcript_path": tp})
+                          "prompt": "remind me to water the plants", "transcript_path": tp})
     assert "waypoints:waypoints" in out, out
     return out, tp
 
@@ -248,7 +248,7 @@ def test_step3_suggestion_line_in_transcript_does_not_clear_barrier(tmp_path):
             {"type": "text", "text": "waypoints list"}]}},
     ])
     ss.hook_prompt({"session_id": SESSION_ID, "cwd": str(tmp_path),
-                    "prompt": "waypoints list", "transcript_path": tp})
+                    "prompt": "remind me to water the plants", "transcript_path": tp})
     out = ss.hook_pretool({"session_id": SESSION_ID, "tool_name": "Bash",
                            "tool_input": {"command": "ls"}, "transcript_path": tp})
     assert out != "", "the hook's own suggestion line (user role) must NOT count as a visible answer"
@@ -264,7 +264,7 @@ def test_step3_assistant_text_still_clears(tmp_path):
         _assistant_text("skipping waypoints, not needed here"),
     ])
     ss.hook_prompt({"session_id": SESSION_ID, "cwd": str(tmp_path),
-                    "prompt": "waypoints list", "transcript_path": tp})
+                    "prompt": "remind me to water the plants", "transcript_path": tp})
     out = ss.hook_pretool({"session_id": SESSION_ID, "tool_name": "Bash",
                            "tool_input": {"command": "ls"}, "transcript_path": tp})
     assert out == "", "an assistant text mention must still clear the barrier"

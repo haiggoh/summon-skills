@@ -703,7 +703,8 @@ def test_known_skills_fail_open_and_bounded(home, tmp_path):
     assert ss.known_skills({"transcript_path": "/nonexistent/x.jsonl"}, routes, index) == set()
     assert ss.known_skills({}, routes, index) == set()
     bad = tmp_path / "bad.jsonl"
-    bad.write_text("not json\n{broken\n" + json.dumps({"type": "assistant"}) + "\n", encoding="utf-8")
+    bad.write_text("not json\n{broken\n" + json.dumps({"type": "assistant"}) + "\n"
+                   + '[1,2]\n"hello"\n{"message":"str"}\n', encoding="utf-8")
     assert ss.known_skills({"transcript_path": str(bad)}, routes, index) == set()
     big = tmp_path / "big.jsonl"
     line = json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
@@ -729,6 +730,41 @@ def test_hook_prompt_skips_script_known_skill(home, tmp_path):
                "transcript_path": str(f), "cwd": str(home.ch)}
     out = run_hook("prompt", payload)[1]
     assert "waypoints:waypoints" not in out, out
+
+
+def test_plugin_scripts_marks_plugin_own_skill_only(home, tmp_path):
+    # validator finding: the P:P branch (no knowledge entry) must be what marks zeta:zeta
+    home.plugin("zeta", ["zeta", "zeta-gated"])
+    b = home.ch / "plugins" / "cache" / "mkt" / "zeta" / "1.0.0" / "bin"
+    b.mkdir(parents=True, exist_ok=True)
+    exe = b / "zeta-tool"
+    exe.write_text("#!/bin/sh\n", encoding="utf-8")
+    exe.chmod(0o755)
+    (b / "not-exec.txt").write_text("x", encoding="utf-8")   # not executable -> excluded
+    home.sync()
+    ps = ss.plugin_scripts(ss.load_index())
+    assert "zeta-tool" in ps.get("zeta", [])
+    assert "not-exec.txt" not in ps.get("zeta", [])
+    f = _write_tp(tmp_path, [_bash("zeta-tool run")])
+    routes, _ = ss.load_routes()
+    known = ss.known_skills({"transcript_path": str(f)}, routes, ss.load_index())
+    assert "zeta:zeta" in known
+    assert "zeta:zeta-gated" not in known
+
+
+def test_pretool_clears_pending_known_by_banner(home, tmp_path, monkeypatch):
+    home.plugin("waypoints", ["waypoints"])
+    home.sync()
+    monkeypatch.setattr(ss, "session_dir", lambda: tmp_path / "sessions")
+    f = _write_tp(tmp_path, [{"type": "user", "message": {"role": "user", "content": [
+        {"type": "text", "text": "🧭 waypoints: 3 open"}]}}])
+    sid = "pretool-known"
+    ss._save_barrier(sid, {"pending": {"waypoints:waypoints": "open-items"},
+                           "reminders": 0, "batch": "b1"}, new_batch=True)
+    out = ss.hook_pretool({"session_id": sid, "transcript_path": str(f),
+                           "tool_name": "Bash", "tool_input": {"command": "ls"}})
+    assert out == "", out   # cleared as known -> nothing to remind about, never blocks
+    assert ss._load_barrier(sid).get("pending") == {}
 
 
 # ---------------------------------------------------------------- Task 3 (0.3.0): familiarity cache + habit weight
@@ -786,3 +822,100 @@ def test_old_entries_dropped(home, tmp_path, monkeypatch):
     ss.refresh_familiarity(budget_s=30.0)
     data = json.loads(cache.read_text(encoding="utf-8"))
     assert "superpowers:brainstorming" not in data      # > 30 days old -> dropped on write
+
+
+# ---------------------------------------------------------------- Task 4 (0.3.0): scoring + dampers
+
+def test_rare_skill_outranks_habitual(home, tmp_path, monkeypatch):
+    home.plugin("p", ["rare", "habitual"])
+    home.sync()
+    # habitual route FIRST in file order: without weighting it would win, so this test
+    # goes red both pre-implementation and under the weights-forced-to-1.0 discriminant
+    _routes_file(tmp_path, monkeypatch, [
+        {"id": "b", "kind": "process", "match": {"words": ["zebra"]}, "skills": ["p:habitual"]},
+        {"id": "a", "kind": "process", "match": {"words": ["zebra"]}, "skills": ["p:rare"]}])
+    routes, errors = ss.load_routes()
+    assert errors == []
+    picked = ss.suggest("zebra", routes, ss.load_index(), (), ss.DEFAULT_MAX,
+                        ctx={"uses": {"p:habitual": 40.0}})[0]
+    assert picked[0][0] == "p:rare", picked   # weight(40)=0.15 vs weight(0)=1.0
+
+
+def test_habitual_still_suggested_alone(home, tmp_path, monkeypatch):
+    home.plugin("p", ["habitual"])
+    home.sync()
+    _routes_file(tmp_path, monkeypatch, [
+        {"id": "b", "kind": "process", "match": {"words": ["zebra"]}, "skills": ["p:habitual"]}])
+    routes, _ = ss.load_routes()
+    picked = ss.suggest("zebra", routes, ss.load_index(), (), ss.DEFAULT_MAX,
+                        ctx={"uses": {"p:habitual": 1000.0}})[0]
+    assert [s for s, _ in picked] == ["p:habitual"]   # floor: faded, never hard-banned
+
+
+def test_literal_name_excluded(home):
+    home.plugin("waypoints", ["waypoints"])
+    home.sync()
+    routes, _ = ss.load_routes()
+    picked = ss.suggest("run waypoints.py list now", routes, ss.load_index(), (),
+                        ss.DEFAULT_MAX, ctx={})[0]
+    assert "waypoints:waypoints" not in [s for s, _ in picked]
+
+
+def test_literal_name_metachars():
+    assert ss._literal_named("waypoints:waypoints", "waypoints.py add x")
+    assert ss._literal_named("a.b:c+d", "please use c+d here")
+    assert ss._literal_named("superpowers:brainstorming", "/brainstorming please")
+    assert not ss._literal_named("superpowers:brainstorming", "see my-brainstorming-notes.md")
+
+
+def test_short_reply_mode(home, tmp_path, monkeypatch):
+    home.plugin("p", ["rx", "w"])
+    home.sync()
+    _routes_file(tmp_path, monkeypatch, [
+        {"id": "rx", "kind": "domain", "match": {"regex": ["fix the bug"]}, "skills": ["p:rx"]},
+        {"id": "w", "kind": "domain", "match": {"words": ["bug"]}, "skills": ["p:w"]}])
+    routes, _ = ss.load_routes()
+    picked = ss.suggest("fix the bug", routes, ss.load_index(), (), ss.DEFAULT_MAX,
+                        ctx={"turns": 3})[0]
+    assert [s for s, _ in picked] == ["p:rx"]   # <15 words + prior turns: cap 1, strength>=1.0 only
+
+
+def test_document_mode_scans_head_only(home):
+    home.plugin("superpowers", ["using-git-worktrees"])
+    home.sync()
+    routes, _ = ss.load_routes()
+    index = ss.load_index()
+    tail = "# Brief\n" + "lorem ipsum " * 300 + "worktree"     # trigger beyond the head
+    picked = ss.suggest(tail, routes, index, (), ss.DEFAULT_MAX, ctx={})[0]
+    assert "superpowers:using-git-worktrees" not in [s for s, _ in picked]
+    head = "worktree for this feature\n" + "lorem ipsum " * 300  # trigger in the first line
+    picked = ss.suggest(head, routes, index, (), ss.DEFAULT_MAX, ctx={})[0]
+    assert "superpowers:using-git-worktrees" in [s for s, _ in picked]
+
+
+def test_intent_required_for_authoring(home):
+    home.plugin("plugin-dev", ["hook-development"])
+    home.sync()
+    routes, _ = ss.load_routes()
+    index = ss.load_index()
+    discuss = ss.suggest("the jgoal Stop hook's runtime behaviour confuses me - when does it fire?",
+                         routes, index, (), ss.DEFAULT_MAX, ctx={})[0]
+    assert "plugin-dev:hook-development" not in [s for s, _ in discuss]
+    author = ss.suggest("write a Stop hook that reminds me every 5 minutes",
+                        routes, index, (), ss.DEFAULT_MAX, ctx={})[0]
+    assert "plugin-dev:hook-development" in [s for s, _ in author]
+
+
+def test_local_routes_without_new_keys(home):
+    # Review Focus 4: a user routes.local.json without knowledge/intent keys must load cleanly
+    local = ss.state_home() / "routes.local.json"
+    local.parent.mkdir(parents=True, exist_ok=True)
+    local.write_text(json.dumps({"schema": 1, "routes": [
+        {"id": "mine", "kind": "domain", "match": {"words": ["zebra"]}, "skills": ["dataviz"]}]}),
+        encoding="utf-8")
+    routes, errors = ss.load_routes()
+    assert errors == []
+    assert any(r["id"] == "mine" for r in routes)
+    assert ss.knowledge_map().get("waypoints:waypoints")   # default seed still merged
+    picked = ss.suggest("zebra", routes, ss.load_index(), (), ss.DEFAULT_MAX, ctx={})[0]
+    assert "dataviz" in [s for s, _ in picked]
