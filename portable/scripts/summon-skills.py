@@ -412,7 +412,7 @@ def load_routes(defaults=None, local=None):
     return routes, errors
 
 
-def matching_routes(text, routes):
+def matching_routes(text, routes, *, check_intent=False):
     text = text[:SCAN_CHARS]
     low = text.lower()
     hits = []
@@ -422,8 +422,9 @@ def matching_routes(text, routes):
             continue
         if route["_re"] is None or not route["_re"].search(text):
             continue
+        # intent gate only in the 0.3.0 (ctx) path: ctx=None must reproduce 0.2.7 matching
         irx = route.get("_intent_re")
-        if irx is not None and not irx.search(text):
+        if check_intent and irx is not None and not irx.search(text):
             continue          # authoring route: a bare domain word is not an authoring intent
         if route["_ex"] is not None and route["_ex"].search(text):
             continue
@@ -509,7 +510,7 @@ def suggest(text, routes, index, shown=(), cap=DEFAULT_MAX, *, ctx=None):
     short_reply = bool(turns) and len(text.split()) < 15
     if short_reply:
         cap = min(cap, 1)
-    hits = matching_routes(scan, routes)
+    hits = matching_routes(scan, routes, check_intent=True)
     seen = set(shown) | known
     scored, notes = [], []
     for order, route in enumerate(hits):
@@ -522,7 +523,7 @@ def suggest(text, routes, index, shown=(), cap=DEFAULT_MAX, *, ctx=None):
             if info and info.get("invocable"):
                 # a route suggests only its FIRST installed skill — if that one is seen
                 # or literal-named, the route contributes nothing (0.2.7 break semantics)
-                if skill not in seen and not _literal_named(skill, scan):
+                if skill not in seen and not _literal_named(skill, text):
                     w = habit_weight(float(uses.get(skill, 0.0)))
                     scored.append((-strength * w, order, skill, route["id"]))
                 break
@@ -840,6 +841,29 @@ def _is_compact_boundary(rec):
                 and rec["payload"].get("type") == "context_compacted"))
 
 
+def _transcript_has_compact_boundary(tp):
+    """True when the transcript tail contains a compact boundary (deferred entries
+    predate it and expire). Tail-bounded like _scan_known_file."""
+    try:
+        size = os.path.getsize(tp)
+        with open(tp, "rb") as fh:
+            if size > SCAN_TAIL_BYTES:
+                fh.seek(size - SCAN_TAIL_BYTES)
+                fh.readline()
+            for raw in fh:
+                if b"compact" not in raw:
+                    continue
+                try:
+                    rec = json.loads(raw.decode("utf-8", errors="replace"))
+                except ValueError:
+                    continue
+                if isinstance(rec, dict) and _is_compact_boundary(rec):
+                    return True
+    except OSError:
+        pass
+    return False
+
+
 def _assistant_text_blocks(rec):
     """Visible assistant text only: Claude messages and native Codex response items."""
     msg = rec.get("message")
@@ -1147,7 +1171,14 @@ def refresh_familiarity(max_files=200, budget_s=2.0, now=None):
         sid = os.path.splitext(os.path.basename(p))[0]
         date = time.strftime("%Y-%m-%d", time.localtime(mtime))
         for skill in _scan_known_file(p, by_basename, banners):
-            new_entries.setdefault(skill, {})[sid] = [date, 1.0]  # 0.5 declines land in Task 5
+            new_entries.setdefault(skill, {})[sid] = [date, 1.0]
+        # visible declines count 0.5 toward habit (spec 6b Q1/Q8), read from the session's
+        # barrier file — the recorded decision, not a transcript re-extraction
+        bst = _load_json(session_dir() / (sid + ".barrier.json"), {})
+        if isinstance(bst, dict):
+            for sk in bst.get("declined") or []:
+                if isinstance(sk, str):
+                    new_entries.setdefault(sk, {})[sid] = [date, 0.5]
         scanned += 1
     horizon = time.strftime("%Y-%m-%d", time.localtime(now - FAMILIARITY_WINDOW_DAYS * 86400))
     for skill, sessions in new_entries.items():
@@ -1271,21 +1302,50 @@ def _hook_prompt(payload):
     if _cwd_is_linked_worktree(payload):
         routes = [r for r in routes if r.get("id") != "worktree"]
     index = load_index(stale_ok=True)
+    st = _load_barrier(session_id)
+    previous_pending = dict(st.get("pending") or {})
+    declined = list(st.get("declined") or [])
+    deferred = dict(st.get("deferred") or {})
     known = known_skills(payload, routes, index)
-    shown = load_shown(session_id) | known
+    prev_shown = load_shown(session_id)
+    # declines: skills pending from the last batch that were answered in visible text
+    # but never loaded (no Skill tool_use) count as declined
+    if previous_pending:
+        loaded = _loaded_skills_from_transcript(payload)
+        visible = _visible_mentions(payload, previous_pending)
+        for sk in previous_pending:
+            if sk in visible and sk not in loaded and sk not in declined:
+                declined.append(sk)
+    shown = prev_shown | known
     ctx = {"known": sorted(known), "uses": familiarity_uses(), "turns": _assistant_turns(payload)}
     skills, notes = suggest(payload.get("prompt") or "", routes, index, shown, _cap(), ctx=ctx)
-    if not skills and not notes:
-        return ""
-    shown.update(s for s, _ in skills)
-    shown.update("lsp:" + n.split(" ", 1)[0] for n in notes)
-    save_shown(session_id, shown)
+    # deferred: matched skills dropped ONLY because they are known (and not already shown)
+    if known:
+        scan = _scan_text(payload.get("prompt") or "")
+        installed = index.get("skills", {})
+        for route in matching_routes(scan, routes, check_intent=True):
+            for skill in route.get("skills", []):
+                info = installed.get(skill) or (
+                    {"invocable": True} if skill in route.get("_builtin", ()) else None)
+                if info and info.get("invocable") and skill in known and skill not in prev_shown:
+                    deferred.setdefault(skill, {"since_calls": 0, "batch": st.get("batch")})
+                break
     if skills:
+        shown.update(s for s, _ in skills)
+        shown.update("lsp:" + n.split(" ", 1)[0] for n in notes)
+        save_shown(session_id, shown)
         # §6b step 3: record the pending suggestions for the PreToolUse reminder barrier.
         # Each new suggestion set gets a fresh reminders counter (at most REMINDER_LIMIT
         # reminders per suggestion batch; the hook NEVER denies a tool call).
         _save_barrier(session_id, {"pending": {s: r for s, r in skills}, "reminders": 0,
-                                   "batch": uuid.uuid4().hex}, new_batch=True)
+                                   "batch": uuid.uuid4().hex, "declined": declined,
+                                   "deferred": deferred}, new_batch=True)
+    elif declined or deferred:
+        st["declined"] = declined
+        st["deferred"] = deferred
+        _save_barrier(session_id, st)   # same batch: persists decline/defer state
+    if not skills and not notes:
+        return ""
     parts = []
     if skills:
         parts.append("summon-skills: likely relevant -> " +
@@ -1318,7 +1378,12 @@ def _hook_pretool(payload):
     session_id = payload.get("session_id") or "nosession"
     st = _load_barrier(session_id)
     pending = dict(st.get("pending") or {})
-    if not pending or not isinstance(pending, dict):
+    deferred = dict(st.get("deferred") or {})
+    if not isinstance(pending, dict):
+        pending = {}
+    if not isinstance(deferred, dict):
+        deferred = {}
+    if not pending and not deferred:
         return ""
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
@@ -1327,8 +1392,11 @@ def _hook_pretool(payload):
         sk = str(tool_input.get("skill") or "")
         if sk in pending:
             pending.pop(sk)
-            st["pending"] = pending
-            _save_barrier(session_id, st)
+        if sk in deferred:
+            del deferred[sk]
+        st["pending"] = pending
+        st["deferred"] = deferred
+        _save_barrier(session_id, st)
         return ""
     tp = (payload.get("transcript_path") or "").strip()
     if not tp or not os.path.isfile(tp):
@@ -1338,15 +1406,38 @@ def _hook_pretool(payload):
     for sk in list(pending):
         if sk in loaded or sk in visible:
             pending.pop(sk)
+    routes, _ = load_routes()
+    index = load_index(stale_ok=True)
+    kmap = knowledge_map()
+    by = _basename_skill_map(index, kmap)
+    known = _scan_known_file(tp, by, _banner_map(kmap))
+    used = _scan_known_file(tp, by, []) if deferred else set()   # loads + script runs, no banners
+    for sk in list(pending):
+        if sk in known:
+            pending.pop(sk)
+    # deferred lifecycle: used (Skill load / script run) or answered -> drop; a compact
+    # boundary expires all of them; +1 since_calls per tool call; expire at 20
+    for sk in list(deferred):
+        if sk in used or sk in visible:
+            del deferred[sk]
+    if deferred and _transcript_has_compact_boundary(tp):
+        deferred = {}
+    for sk in list(deferred):
+        deferred[sk]["since_calls"] = int(deferred[sk].get("since_calls") or 0) + 1
+        if deferred[sk]["since_calls"] >= 20:
+            del deferred[sk]
+    st["pending"] = pending
+    st["deferred"] = deferred
+    # reminder target: pending first, else the first deferred entry that reached 5 calls
+    target = None
     if pending:
-        # lazy: the script/banner scan only runs when something is still pending
-        routes, _ = load_routes()
-        known = known_skills(payload, routes, load_index(stale_ok=True))
-        for sk in list(pending):
-            if sk in known:
-                pending.pop(sk)
-    if not pending:
-        st["pending"] = {}
+        target = ("pending", next(iter(pending)))
+    else:
+        for sk in deferred:
+            if int(deferred[sk].get("since_calls") or 0) >= 5:
+                target = ("deferred", sk)
+                break
+    if target is None:
         _save_barrier(session_id, st)
         return ""
     # Remind at most REMINDER_LIMIT times per suggestion batch — claimed ATOMICALLY: two
@@ -1361,7 +1452,16 @@ def _hook_pretool(payload):
     n = _claim_reminder(session_id, st.get("batch"))
     if n is None:
         return ""  # all reminder slots taken for this batch -> go silent (fail open)
-    skill = next(iter(pending))
+    kind, skill = target
+    if kind == "deferred":
+        text = ("summon-skills: '%s' matched this task earlier and its knowledge is in context, "
+                "but it has not been used — needed? (not blocked)" % skill)
+        del deferred[skill]          # expires after reminding once
+        st["deferred"] = deferred
+    else:
+        text = ("summon-skills reminder %d/%d: '%s' was suggested for this task and is neither "
+                "loaded nor answered in your visible reply. Invoke it, or say in your visible "
+                "reply why not. This call was NOT blocked." % (n, REMINDER_LIMIT, skill))
     st["reminders"] = n
     try:
         _save_barrier(session_id, st)
@@ -1369,10 +1469,7 @@ def _hook_pretool(payload):
         pass  # the claim file already guarantees the at-most-two invariant
     return json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
-        "additionalContext": (
-            "summon-skills reminder %d/%d: '%s' was suggested for this task and is neither "
-            "loaded nor answered in your visible reply. Invoke it, or say in your visible "
-            "reply why not. This call was NOT blocked." % (n, REMINDER_LIMIT, skill))}})
+        "additionalContext": text}})
 
 
 def hook_session_start(payload):

@@ -906,6 +906,30 @@ def test_intent_required_for_authoring(home):
     assert "plugin-dev:hook-development" in [s for s, _ in author]
 
 
+def test_intent_gate_only_in_ctx_path(home):
+    # validator fix: ctx=None keeps 0.2.7 matching (no intent gate), a dict ctx gates
+    home.plugin("plugin-dev", ["hook-development"])
+    home.sync()
+    routes, _ = ss.load_routes()
+    index = ss.load_index()
+    p = "the jgoal Stop hook's runtime behaviour confuses me - when does it fire?"
+    legacy = ss.suggest(p, routes, index, (), ss.DEFAULT_MAX)[0]          # ctx=None
+    assert "plugin-dev:hook-development" in [s for s, _ in legacy]
+    damped = ss.suggest(p, routes, index, (), ss.DEFAULT_MAX, ctx={})[0]
+    assert "plugin-dev:hook-development" not in [s for s, _ in damped]
+
+
+def test_literal_name_in_doc_tail_still_excludes(home):
+    # literal-name exclusion checks the FULL prompt, not the doc-mode head
+    home.plugin("waypoints", ["waypoints"])
+    home.sync()
+    routes, _ = ss.load_routes()
+    index = ss.load_index()
+    p = "remind me to water the plants\n" + "lorem ipsum " * 200 + "\nsee waypoints.py"
+    picked = ss.suggest(p, routes, index, (), ss.DEFAULT_MAX, ctx={})[0]
+    assert "waypoints:waypoints" not in [s for s, _ in picked]
+
+
 def test_local_routes_without_new_keys(home):
     # Review Focus 4: a user routes.local.json without knowledge/intent keys must load cleanly
     local = ss.state_home() / "routes.local.json"

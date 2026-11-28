@@ -285,3 +285,83 @@ def test_audit_visible_classification_ignores_user_role(tmp_path, monkeypatch, c
     data = json.loads(capsys.readouterr().out)
     route = next(r for r in data["routes"] if r["route"] == "open-items")
     assert route["silent"] == 1 and route["visible"] == 0, route
+
+
+# ---------------------------------------------------------------- Task 5 (0.3.0): declines + deferred reminder
+
+def test_decline_without_tool_calls_recorded(tmp_path):
+    tp = _write_transcript(tmp_path, [{"type": "user", "message": {"role": "user", "content": [
+        {"type": "text", "text": "prompt"}]}}])
+    out = ss.hook_prompt({"session_id": SESSION_ID, "cwd": str(tmp_path),
+                          "prompt": "remind me to water the plants", "transcript_path": tp})
+    assert "waypoints:waypoints" in out
+    # visible decline: assistant text names the skill, no Skill tool_use ever happens
+    with open(tp, "a", encoding="utf-8") as f:
+        f.write(json.dumps(_assistant_text("no waypoints needed, I will just note it")) + "\n")
+    ss.hook_prompt({"session_id": SESSION_ID, "cwd": str(tmp_path),
+                    "prompt": "a completely different topic about tea", "transcript_path": tp})
+    st = ss._load_barrier(SESSION_ID)
+    assert "waypoints:waypoints" in (st.get("declined") or []), st
+
+
+def test_deferred_reminds_once_after_five_calls(tmp_path):
+    # banner in transcript -> waypoints known -> matched but dropped -> deferred
+    tp = _write_transcript(tmp_path, [{"type": "user", "message": {"role": "user", "content": [
+        {"type": "text", "text": "🧭 waypoints: 3 open"}]}}])
+    out = ss.hook_prompt({"session_id": SESSION_ID, "cwd": str(tmp_path),
+                          "prompt": "remind me to water the plants", "transcript_path": tp})
+    assert "waypoints:waypoints" not in out
+    st = ss._load_barrier(SESSION_ID)
+    assert "waypoints:waypoints" in (st.get("deferred") or {}), st
+    outs = [ss.hook_pretool({"session_id": SESSION_ID, "tool_name": "Bash",
+                             "tool_input": {"command": "ls"}, "transcript_path": tp})
+            for _ in range(5)]
+    assert all("matched this task earlier" not in o for o in outs[:4]), outs
+    assert "matched this task earlier" in outs[4], outs
+    st = ss._load_barrier(SESSION_ID)
+    assert "waypoints:waypoints" not in (st.get("deferred") or {}), "reminded once -> expires"
+    out6 = ss.hook_pretool({"session_id": SESSION_ID, "tool_name": "Bash",
+                            "tool_input": {"command": "ls"}, "transcript_path": tp})
+    assert "matched this task earlier" not in out6
+
+
+def test_deferred_never_blocks(tmp_path):
+    tp = _write_transcript(tmp_path, [{"type": "user", "message": {"role": "user", "content": [
+        {"type": "text", "text": "🧭 waypoints: 3 open"}]}}])
+    ss.hook_prompt({"session_id": SESSION_ID, "cwd": str(tmp_path),
+                    "prompt": "remind me to water the plants", "transcript_path": tp})
+    for _ in range(6):
+        out = ss.hook_pretool({"session_id": SESSION_ID, "tool_name": "Bash",
+                               "tool_input": {"command": "ls"}, "transcript_path": tp})
+        if out:
+            d = json.loads(out)
+            assert "permissionDecision" not in d["hookSpecificOutput"]
+            assert "decision" not in d["hookSpecificOutput"]
+
+
+def test_deferred_expires_at_twenty(tmp_path):
+    tp = _write_transcript(tmp_path, [{"type": "user", "message": {"role": "user", "content": [
+        {"type": "text", "text": "🧭 waypoints: 3 open"}]}}])
+    ss.hook_prompt({"session_id": SESSION_ID, "cwd": str(tmp_path),
+                    "prompt": "remind me to water the plants", "transcript_path": tp})
+    st = ss._load_barrier(SESSION_ID)
+    st["deferred"]["waypoints:waypoints"]["since_calls"] = 19
+    st["reminders"] = ss.REMINDER_LIMIT          # budget spent -> no reminder can fire
+    ss._save_barrier(SESSION_ID, st, new_batch=True)
+    out = ss.hook_pretool({"session_id": SESSION_ID, "tool_name": "Bash",
+                           "tool_input": {"command": "ls"}, "transcript_path": tp})
+    assert out == ""
+    st = ss._load_barrier(SESSION_ID)
+    assert "waypoints:waypoints" not in (st.get("deferred") or {}), "expires at 20 calls"
+
+
+def test_decline_counts_half_toward_habit(tmp_path):
+    d = tmp_path / "projects" / "p"
+    d.mkdir(parents=True)
+    (d / "sess1.jsonl").write_text(json.dumps({"type": "user", "message": {"role": "user",
+        "content": [{"type": "text", "text": "hi"}]}}) + "\n", encoding="utf-8")
+    ss.session_dir().mkdir(parents=True, exist_ok=True)
+    (ss.session_dir() / "sess1.barrier.json").write_text(
+        json.dumps({"declined": ["waypoints:waypoints"]}), encoding="utf-8")
+    ss.refresh_familiarity(budget_s=30.0)
+    assert ss.familiarity_uses().get("waypoints:waypoints") == 0.5
