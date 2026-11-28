@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.0] — 2026-11-28
+
+### Added — tool-output and command triggers
+
+- New **PostToolUse** hook (matcher `Bash`, timeout 10 s): a route's `on_output` regexes scan the first 4 000 chars of the tool result. Seed: failing tests (`\b\d+ failed\b|FAILED|Traceback`) suggest `superpowers:systematic-debugging`.
+- **PreToolUse** now also matches `on_command` on Bash commands. Seed: `git commit` / `git push` suggest `superpowers:verification-before-completion`.
+- Rate limits: at most one output trigger per 10 tool calls and once per route per session; known and declined skills are respected; the rare skill wins the slot by habit weight. Replies are `hookSpecificOutput.additionalContext` only — the hook never blocks.
+- Suite 181 passed; regression replay 58 rows / 0 violations.
+
 ## [0.3.0] — 2026-11-28
 
 ### Changed — suggestions rank by familiarity and stay quiet when the knowledge is already in context
