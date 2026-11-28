@@ -419,8 +419,12 @@ def matching_routes(text, routes):
     return hits
 
 
-def suggest(text, routes, index, shown=(), cap=DEFAULT_MAX):
-    """Return (skills, notes): skills=[(skill, route_id)] process-first, capped, deduped."""
+def suggest(text, routes, index, shown=(), cap=DEFAULT_MAX, *, ctx=None):
+    """Return (skills, notes): skills=[(skill, route_id)] process-first, capped, deduped.
+
+    ctx (0.3.0): None or a dict with optional keys "turns" (int), "known" ([skill]),
+    "uses" ({skill: float}). ctx=None MUST reproduce 0.2.7 output exactly (pinned by
+    test_suggest_ctx_none_is_identity); the dampers that read it land in later tasks."""
     installed = index.get("skills", {})
     plugins = set(index.get("plugins", []))
     picked, notes, seen = [], [], set(shown)
@@ -580,11 +584,14 @@ def cmd_audit(args):
 
 
 def cmd_replay(args):
-    """Re-run suggest() over a labelled corpus (jsonl lines: {"prompt":…, "expect":…})."""
+    """Re-run suggest() over a labelled corpus. Rows (jsonl): {"prompt", "expect"?,
+    "expect_any"?: [skill], "expect_none"?: [skill], "context"?: ctx, "pending_task"?,
+    "note"?}. Rows with pending_task are measured (their violations are tagged) but do not
+    affect the exit code until that task lands and the key is removed."""
     routes, _errors = load_routes()
     index = load_index(stale_ok=True)
     lines = hits = 0
-    details = []
+    details, violations = [], []
     try:
         with open(args.corpus, encoding="utf-8") as f:
             for ln in f:
@@ -592,27 +599,49 @@ def cmd_replay(args):
                 if not ln:
                     continue
                 rec = json.loads(ln)
-                skills, _notes = suggest(rec.get("prompt") or "", routes, index, shown=set(),
-                                         cap=DEFAULT_MAX)
+                prompt = rec.get("prompt") or ""
+                ctx = rec.get("context") if isinstance(rec.get("context"), dict) else None
+                # the prompt hook folds known skills into `shown`; replay mirrors that
+                shown = set((ctx or {}).get("known") or [])
+                skills, _notes = suggest(prompt, routes, index, shown=shown, cap=DEFAULT_MAX,
+                                         ctx=ctx)
                 fired = [rid for _s, rid in skills]
+                fired_skills = [s for s, _r in skills]
                 expect = rec.get("expect")
                 hit = bool(expect) and expect in fired
                 lines += 1
                 hits += 1 if hit else 0
-                details.append({"prompt": rec.get("prompt", "")[:80], "fired": fired,
+                details.append({"prompt": prompt[:80], "fired": fired, "skills": fired_skills,
                                 "expect": expect, "hit": hit})
+                any_expect = rec.get("expect_any") or []
+                # expect_any is satisfied when AT LEAST ONE listed skill fired
+                missing = [] if not any_expect or any(s in fired_skills for s in any_expect) \
+                    else list(any_expect)
+                unwanted = [s for s in (rec.get("expect_none") or []) if s in fired_skills]
+                if missing or unwanted:
+                    v = {"prompt": prompt[:80], "missing": missing, "unwanted": unwanted}
+                    if rec.get("pending_task"):
+                        v["pending_task"] = rec["pending_task"]
+                    violations.append(v)
     except OSError as e:
         print("replay: cannot read corpus: %s" % e, file=sys.stderr)
         return 2
+    active = [v for v in violations if "pending_task" not in v]
     if args.json:
-        print(json.dumps({"lines": lines, "hits": hits, "details": details}))
+        print(json.dumps({"lines": lines, "hits": hits, "details": details,
+                          "violations": violations, "active_violations": len(active)}))
     else:
         for d in details:
             print("%-6s expect=%-18s fired=%s  %s" % ("HIT" if d["hit"] else "miss",
                                                     d["expect"] or "-", ",".join(d["fired"]) or "-",
                                                     d["prompt"]))
-        print("replay: %d/%d corpus lines hit their expected route" % (hits, lines))
-    return 0
+        for v in violations:
+            tag = " (pending_task %s)" % v["pending_task"] if "pending_task" in v else ""
+            print("VIOLATION%s missing=%s unwanted=%s  %s" % (
+                tag, ",".join(v["missing"]) or "-", ",".join(v["unwanted"]) or "-", v["prompt"]))
+        print("replay: %d/%d corpus lines hit their expected route, %d violation(s) (%d active)"
+              % (hits, lines, len(violations), len(active)))
+    return 1 if active else 0
 
 
 # ---------------------------------------------------------------- session state
@@ -1153,7 +1182,8 @@ def main(argv=None):
     p.add_argument("--max-files", type=int, default=200, dest="max_files")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("replay", help="re-run suggest() over a labelled corpus jsonl "
-                                      "({prompt, expect}); reports fired vs expected per line")
+                                      "({prompt, expect?, expect_any?, expect_none?, context?}); "
+                                      "--json adds violations, exit 1 on active violations")
     p.add_argument("corpus")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("doctor", help="validate routes, index and LSP binaries")
