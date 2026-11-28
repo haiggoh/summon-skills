@@ -1,6 +1,7 @@
 {
   "schema": 1,
   "builtin_skills": ["claude-api", "code-review", "security-review", "simplify", "update-config", "dataviz", "loop", "run", "init"],
+  "knowledge": {"waypoints:waypoints": {"scripts": ["waypoints.py", "waypoints"], "banner": "🧭 waypoints:"}},
   "routes": [
     {"id": "brainstorming", "kind": "process",
      "match": {"words": ["let's build", "lets build", "let us build", "new feature", "brainstorm", "i want to build", "we should build", "design a", "add a feature", "new plugin", "new project"],

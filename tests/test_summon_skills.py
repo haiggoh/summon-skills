@@ -637,3 +637,95 @@ def test_shipped_routes_load_without_errors_and_merge_conflict_is_gone():
     routes, errors = ss.load_routes()
     assert errors == []
     assert "merge-conflict" not in {r["id"] for r in routes}
+
+
+# ---------------------------------------------------------------- Task 2 (0.3.0): knowledge in context
+
+def _write_tp(tmp_path, records):
+    d = tmp_path / "tp"
+    d.mkdir(exist_ok=True)
+    f = d / "s.jsonl"
+    f.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    return f
+
+
+def _bash(cmd):
+    return {"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "tool_use", "name": "Bash", "input": {"command": cmd}}]}}
+
+
+def test_known_via_skill_load(home, tmp_path):
+    f = _write_tp(tmp_path, [_skill_use("superpowers:systematic-debugging")])
+    routes, _ = ss.load_routes()
+    known = ss.known_skills({"transcript_path": str(f)}, routes, ss.load_index())
+    assert "superpowers:systematic-debugging" in known
+
+
+def test_known_via_plugin_script_marks_only_plugin_own_skill(home, tmp_path):
+    home.plugin("waypoints", ["waypoints", "waypoints-gated"])
+    b = home.ch / "plugins" / "cache" / "mkt" / "waypoints" / "1.0.0" / "bin"
+    b.mkdir(parents=True, exist_ok=True)
+    exe = b / "waypoints.py"
+    exe.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    exe.chmod(0o755)
+    home.sync()
+    f = _write_tp(tmp_path, [_bash("waypoints.py add fix the runners")])
+    routes, _ = ss.load_routes()
+    known = ss.known_skills({"transcript_path": str(f)}, routes, ss.load_index())
+    assert "waypoints:waypoints" in known
+    assert "waypoints:waypoints-gated" not in known
+
+
+def test_known_via_banner(home, tmp_path):
+    home.plugin("waypoints", ["waypoints"])
+    home.sync()
+    rec = {"type": "user", "message": {"role": "user", "content": [
+        {"type": "text", "text": "SessionStart hook success: 🧭 waypoints: 394 open waypoint(s)"}]}}
+    f = tmp_path / "tp" / "b.jsonl"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    # real transcripts store emoji both raw and \\u-escaped (verified 2026-11-28) — cover both
+    f.write_text(json.dumps(rec) + "\n" + json.dumps(rec, ensure_ascii=False) + "\n",
+                 encoding="utf-8")
+    routes, _ = ss.load_routes()
+    known = ss.known_skills({"transcript_path": str(f)}, routes, ss.load_index())
+    assert "waypoints:waypoints" in known
+
+
+def test_compaction_resets_known(home, tmp_path):
+    f = _write_tp(tmp_path, [_skill_use("superpowers:brainstorming"), {"type": "compact_boundary"}])
+    routes, _ = ss.load_routes()
+    assert ss.known_skills({"transcript_path": str(f)}, routes, ss.load_index()) == set()
+
+
+def test_known_skills_fail_open_and_bounded(home, tmp_path):
+    routes, _ = ss.load_routes()
+    index = ss.load_index()
+    assert ss.known_skills({"transcript_path": "/nonexistent/x.jsonl"}, routes, index) == set()
+    assert ss.known_skills({}, routes, index) == set()
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text("not json\n{broken\n" + json.dumps({"type": "assistant"}) + "\n", encoding="utf-8")
+    assert ss.known_skills({"transcript_path": str(bad)}, routes, index) == set()
+    big = tmp_path / "big.jsonl"
+    line = json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "text", "text": "working on it " * 20}]}}) + "\n"
+    big.write_text(line * 50000, encoding="utf-8")
+    t0 = time.perf_counter()
+    known = ss.known_skills({"transcript_path": str(big)}, routes, index)
+    dt = time.perf_counter() - t0
+    assert isinstance(known, set)
+    assert dt < 1.5, dt   # Review Focus 1: a huge transcript must not blow the hook budget
+
+
+def test_hook_prompt_skips_script_known_skill(home, tmp_path):
+    home.plugin("waypoints", ["waypoints"])
+    b = home.ch / "plugins" / "cache" / "mkt" / "waypoints" / "1.0.0" / "bin"
+    b.mkdir(parents=True, exist_ok=True)
+    exe = b / "waypoints.py"
+    exe.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    exe.chmod(0o755)
+    home.sync()
+    f = _write_tp(tmp_path, [_bash("waypoints.py list")])
+    payload = {"session_id": "known-1", "prompt": "add a waypoint to fix the runners",
+               "transcript_path": str(f), "cwd": str(home.ch)}
+    out = run_hook("prompt", payload)[1]
+    assert "waypoints:waypoints" not in out, out

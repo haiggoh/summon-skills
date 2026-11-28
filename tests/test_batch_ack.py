@@ -18,7 +18,7 @@ def setup(tmp_path, monkeypatch):
     monkeypatch.setattr(ss, 'session_dir', lambda: tmp_path / 'sessions')
     monkeypatch.setattr(ss, 'load_routes', lambda: ([], []))
     monkeypatch.setattr(ss, 'load_index', lambda **kw: {})
-    monkeypatch.setattr(ss, 'suggest', lambda prompt, *args: ([(prompt, 'test')], []))
+    monkeypatch.setattr(ss, 'suggest', lambda prompt, *args, **kw: ([(prompt, 'test')], []))
     transcript = tmp_path / 'transcript.jsonl'
     transcript.write_text('')
     return {'session_id': 'test', 'transcript_path': str(transcript), 'tool_name': 'Bash'}

@@ -827,6 +827,110 @@ def _loaded_skills_from_transcript(payload):
     return loaded
 
 
+def plugin_scripts(source=None):
+    """{plugin: [executable basenames in its bin/ and scripts/]} over enabled plugins.
+    Accepts a claude-home path, an index dict (roots re-resolved via claude_home()), or None.
+    A dict without a "skills" key (e.g. a test stub {}) has no roots to scan -> {}."""
+    if isinstance(source, dict):
+        if "skills" not in source:
+            return {}
+        ch = claude_home()
+    else:
+        ch = Path(source) if source is not None else claude_home()
+    out = {}
+    for plugin, root in enabled_plugins(ch):
+        names = []
+        for sub in ("bin", "scripts"):
+            d = root / sub
+            if d.is_dir():
+                for p in sorted(d.iterdir()):
+                    if p.is_file() and os.access(str(p), os.X_OK):
+                        names.append(p.name)
+        if names:
+            out[plugin] = names
+    return out
+
+
+def knowledge_map():
+    """Merged top-level "knowledge" map from the default + local routes files:
+    {skill: {"scripts": [basename...], "banner": regex}}. Unknown/missing keys -> {}."""
+    merged = {}
+    for source in (default_routes_path(), state_home() / "routes.local.json"):
+        data = _load_json(source, None)
+        if isinstance(data, dict) and isinstance(data.get("knowledge"), dict):
+            for skill, entry in data["knowledge"].items():
+                if isinstance(entry, dict):
+                    merged[skill] = entry
+    return merged
+
+
+def known_skills(payload, routes, index):
+    """Skills whose knowledge is already in context AFTER the last compact_boundary, one pass
+    over the transcript: Skill tool_use loads, Bash runs of a plugin's executable (marks the
+    plugin's own skill "P:P", plus any skill whose knowledge[skill].scripts lists the
+    basename), and knowledge[skill].banner regexes matched against each record's RAW line
+    (attachments/hook output are embedded there). Fail OPEN to set()."""
+    tp = (payload.get("transcript_path") or "").strip() if isinstance(payload, dict) else ""
+    if not tp or not os.path.isfile(tp):
+        return set()
+    kmap = knowledge_map()
+    by_basename = {}
+    for plugin, names in plugin_scripts(index).items():
+        for n in names:
+            by_basename.setdefault(n, set()).add("%s:%s" % (plugin, plugin))
+    for skill, entry in kmap.items():
+        scripts = entry.get("scripts")
+        if isinstance(scripts, list):
+            for n in scripts:
+                by_basename.setdefault(str(n), set()).add(skill)
+    banners = []
+    for skill, entry in kmap.items():
+        pat = entry.get("banner")
+        if pat:
+            try:
+                banners.append((skill, re.compile(str(pat))))
+            except re.error:
+                pass
+    known = set()
+    try:
+        with open(tp, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    rec = None
+                if rec is not None and _is_compact_boundary(rec):
+                    known = set()
+                # real transcripts store emoji both raw and \\u-escaped (verified 2026-11-28):
+                # scan the raw line, and the re-dumped raw-UTF-8 form when escapes are present
+                hay = line
+                if "\\u" in line and rec is not None:
+                    hay = json.dumps(rec, ensure_ascii=False)
+                for skill, rx in banners:
+                    if rx.search(hay):
+                        known.add(skill)
+                if rec is None:
+                    continue
+                for block in (rec.get("message") or {}).get("content") or []:
+                    if not isinstance(block, dict) or block.get("type") != "tool_use":
+                        continue
+                    inp = block.get("input") or {}
+                    if block.get("name") == "Skill":
+                        sk = inp.get("skill")
+                        if sk:
+                            known.add(sk)
+                    elif block.get("name") == "Bash" and isinstance(inp.get("command"), str):
+                        for tok in re.split(r"[\s;|&]+", inp["command"]):
+                            base = os.path.basename(tok.strip().strip("\"'"))
+                            if base in by_basename:
+                                known.update(by_basename[base])
+    except OSError:
+        return set()
+    return known
+
+
 def save_shown(session_id, shown):
     path = _state_file(session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -896,8 +1000,10 @@ def _hook_prompt(payload):
     if _cwd_is_linked_worktree(payload):
         routes = [r for r in routes if r.get("id") != "worktree"]
     index = load_index(stale_ok=True)
-    shown = load_shown(session_id) | _loaded_skills_from_transcript(payload)
-    skills, notes = suggest(payload.get("prompt") or "", routes, index, shown, _cap())
+    known = known_skills(payload, routes, index)
+    shown = load_shown(session_id) | known
+    skills, notes = suggest(payload.get("prompt") or "", routes, index, shown, _cap(),
+                            ctx={"known": sorted(known)})
     if not skills and not notes:
         return ""
     shown.update(s for s, _ in skills)
@@ -957,9 +1063,11 @@ def _hook_pretool(payload):
     if not tp or not os.path.isfile(tp):
         return ""  # cannot prove load/answer either way -> fail open WITHOUT reminding
     loaded = _loaded_skills_from_transcript(payload)
+    routes, _ = load_routes()
+    known = known_skills(payload, routes, load_index(stale_ok=True))
     visible = _visible_mentions(payload, pending)
     for sk in list(pending):
-        if sk in loaded or sk in visible:
+        if sk in loaded or sk in visible or sk in known:
             pending.pop(sk)
     if not pending:
         st["pending"] = {}
