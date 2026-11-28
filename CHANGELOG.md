@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.0] — 2026-11-28
+
+### Changed — suggestions rank by familiarity and stay quiet when the knowledge is already in context
+
+- **Rarer skills surface first**: ranking score = route strength × a graded habit weight `max(0.15, 1/(1+uses/5))` summed over the last 30 days (`familiarity.json`, refreshed at SessionStart — bounded ≤200 files / ≤2 s, atomic write, stale cache kept on overrun). Habitual skills fade gradually, never a hard cutoff.
+- **Known skills don't re-suggest**: a skill counts as known when loaded via the Skill tool, its plugin's executable ran in Bash, or its SessionStart banner is in the transcript — all after the last compact boundary. Seeded for `waypoints:waypoints`.
+- **Mid-task dampers**: a literal skill name in the prompt takes no slot ("run waypoints.py" no longer re-suggests waypoints); pasted documents match on first line + first 600 chars only; short replies (<15 words after the first assistant turn) get at most one strength-1.0 suggestion; authoring routes (hook/plugin/skill dev) need an authoring verb within 6 words of the domain noun, so discussing a hook no longer suggests writing one.
+- **Declines are learned**: a suggestion answered in visible text without loading counts 0.5 toward habit; a matched-but-known skill gets one quiet deferred reminder after 5 tool calls (never blocks, shares the 2-per-batch reminder budget, expires after reminding, at 20 calls, or on compaction).
+- **Routes**: 14 new routes for previously unrouted skills (drafted by a free-lane dispatch, each replay-verified), 63 → 77 total.
+- Measured on the labelled regression set (`replay tests/fixtures/regression.jsonl`): BEFORE 30 rows, 9 false-positive violations, mean 1.27 suggestions/prompt → AFTER 58 rows, 0 violations, mean 0.88, all labelled positives held; suite 175 passed.
+
 ## [0.2.7] — 2026-11-28
 
 ### Fixed — three routes were silently dead because the skill they named had been renamed or removed: `local-offload` now points at `free-agents:offload` (was `offload-to-local`), `execution-plan-layer` at `lasting-plans:plan-airtight` (was `run-to-completion:writing-execution-plans`), and the `merge-conflict` route is removed (mattpocock-skills 1.3.x no longer ships `resolving-merge-conflicts` as a skill).
