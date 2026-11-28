@@ -5,7 +5,7 @@
 ### Fixed — three routes were silently dead because the skill they named had been renamed or removed: `local-offload` now points at `free-agents:offload` (was `offload-to-local`), `execution-plan-layer` at `lasting-plans:plan-airtight` (was `run-to-completion:writing-execution-plans`), and the `merge-conflict` route is removed (mattpocock-skills 1.3.x no longer ships `resolving-merge-conflicts` as a skill).
 
 - New guard: the SessionStart line names any **stale route target** — a route skill whose plugin is enabled but no longer ships it — so a future rename shows up the next session instead of going quiet.
-- New `plan-offload` route: planning and decomposition prompts ("write a plan", "break this down", "multi-step") also suggest `free-agents:offload`; new `free-handover` route: handoff/successor/overnight prompts suggest `free-agents:free-session-handover`.
+- New `plan-offload` route: planning and decomposition prompts ("write a plan", "break this down", "decompose") also suggest `free-agents:offload`; new `free-handover` route: successor-session / handover-doc / overnight-run prompts suggest `free-agents:free-session-handover`. Both carry negative tests against everyday wording ("plan the office party", "a free session at the gym").
 - Design for the next two releases (familiarity ranking, mid-task dampers, tool-output triggers): `docs/superpowers/specs/2026-11-28-contextual-triggering-design.md`.
 
 ## [0.2.6] — 2026-11-24

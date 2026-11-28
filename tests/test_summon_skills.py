@@ -593,7 +593,7 @@ def test_session_start_line_names_stale_route_targets(home, tmp_path, monkeypatc
     assert "stale route target" in line and "superpowers:gone-skill" in line
 
 
-def test_shipped_routes_have_no_stale_targets_for_their_live_names(home):
+def test_renamed_routes_point_at_live_names(home):
     """The three renames found 2026-11-28 point at the CURRENT skill names."""
     routes = {r["id"]: r["skills"] for r in json.loads((ROOT / "rules" / "routes.json").read_text())["routes"]}
     assert routes["local-offload"] == ["free-agents:offload"]
@@ -617,3 +617,23 @@ def test_handoff_prompt_suggests_free_session_handover(home):
     out = run_hook("prompt", {"prompt": "hand this over to a successor session overnight",
                               "session_id": "s-handover"})[1]
     assert "free-agents:free-session-handover" in out
+
+
+@pytest.mark.parametrize("prompt", [
+    "help me plan the office party",
+    "can you plan for my vacation next month",
+    "a multi-step morning routine",
+    "book me a free session at the climbing gym",
+    "handover of the keys is on friday",
+    "hand off the keys to the new admin"])
+def test_offload_and_handover_not_on_ordinary_prompts(home, prompt):
+    home.plugin("free-agents", ["offload", "free-session-handover"])
+    home.sync()
+    out = run_hook("prompt", {"prompt": prompt, "session_id": "neg-%d" % abs(hash(prompt))})[1]
+    assert "free-agents:offload" not in out and "free-agents:free-session-handover" not in out
+
+
+def test_shipped_routes_load_without_errors_and_merge_conflict_is_gone():
+    routes, errors = ss.load_routes()
+    assert errors == []
+    assert "merge-conflict" not in {r["id"] for r in routes}
