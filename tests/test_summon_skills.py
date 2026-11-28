@@ -729,3 +729,60 @@ def test_hook_prompt_skips_script_known_skill(home, tmp_path):
                "transcript_path": str(f), "cwd": str(home.ch)}
     out = run_hook("prompt", payload)[1]
     assert "waypoints:waypoints" not in out, out
+
+
+# ---------------------------------------------------------------- Task 3 (0.3.0): familiarity cache + habit weight
+
+def test_habit_weight_curve():
+    assert ss.habit_weight(0) == 1.0
+    assert ss.habit_weight(5) == 0.5
+    assert ss.habit_weight(15) == 0.25
+    assert ss.habit_weight(40) == 0.15     # floor
+    assert ss.habit_weight(1000) == 0.15   # floor, never a hard cutoff
+    prev = 2.0
+    for u in range(101):                    # monotone non-increasing
+        w = ss.habit_weight(u)
+        assert w <= prev + 1e-12
+        prev = w
+
+
+def test_refresh_bounded(home, tmp_path, monkeypatch):
+    monkeypatch.setenv("SUMMON_SKILLS_TRANSCRIPTS", str(tmp_path / "projects"))
+    d = tmp_path / "projects" / "p"
+    d.mkdir(parents=True)
+    line = json.dumps(_skill_use("superpowers:systematic-debugging")) + "\n"
+    for i in range(300):
+        (d / ("s%03d.jsonl" % i)).write_text(line, encoding="utf-8")
+    n = ss.refresh_familiarity(max_files=200, budget_s=30.0)
+    assert n <= 200
+    assert (ss.state_home() / "familiarity.json").is_file()
+    assert ss.familiarity_uses().get("superpowers:systematic-debugging", 0) > 0
+
+
+def test_refresh_atomic_and_corrupt_tolerant(home, tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    monkeypatch.setenv("SUMMON_SKILLS_TRANSCRIPTS", str(tmp_path / "projects"))
+    d = tmp_path / "projects" / "p"
+    d.mkdir(parents=True)
+    (d / "s1.jsonl").write_text(json.dumps(_skill_use("superpowers:brainstorming")) + "\n",
+                                encoding="utf-8")
+    cache = ss.state_home() / "familiarity.json"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text("garbage{{{", encoding="utf-8")
+    assert ss.familiarity_uses() == {}      # corrupt cache reads as empty
+    with ThreadPoolExecutor(max_workers=2) as pool:   # Review Focus 3: concurrent refreshes
+        list(pool.map(lambda _: ss.refresh_familiarity(budget_s=30.0), range(2)))
+    json.loads(cache.read_text(encoding="utf-8"))      # must parse after the race
+
+
+def test_old_entries_dropped(home, tmp_path, monkeypatch):
+    monkeypatch.setenv("SUMMON_SKILLS_TRANSCRIPTS", str(tmp_path / "projects"))
+    (tmp_path / "projects").mkdir(parents=True)
+    cache = ss.state_home() / "familiarity.json"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    old = time.strftime("%Y-%m-%d", time.localtime(time.time() - 40 * 86400))
+    cache.write_text(json.dumps({"superpowers:brainstorming": {"old-sess": [old, 1.0]},
+                                 "_meta": {"last_scan_mtime": 0.0}}), encoding="utf-8")
+    ss.refresh_familiarity(budget_s=30.0)
+    data = json.loads(cache.read_text(encoding="utf-8"))
+    assert "superpowers:brainstorming" not in data      # > 30 days old -> dropped on write

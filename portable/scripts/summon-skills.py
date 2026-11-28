@@ -864,25 +864,22 @@ def knowledge_map():
     return merged
 
 
-def known_skills(payload, routes, index):
-    """Skills whose knowledge is already in context AFTER the last compact_boundary, one pass
-    over the transcript: Skill tool_use loads, Bash runs of a plugin's executable (marks the
-    plugin's own skill "P:P", plus any skill whose knowledge[skill].scripts lists the
-    basename), and knowledge[skill].banner regexes matched against each record's RAW line
-    (attachments/hook output are embedded there). Fail OPEN to set()."""
-    tp = (payload.get("transcript_path") or "").strip() if isinstance(payload, dict) else ""
-    if not tp or not os.path.isfile(tp):
-        return set()
-    kmap = knowledge_map()
-    by_basename = {}
+def _basename_skill_map(index, kmap):
+    """{executable basename: {skills it proves known}} — a plugin's own scripts mark the
+    plugin's skill "P:P"; knowledge[skill].scripts entries mark that skill explicitly."""
+    by = {}
     for plugin, names in plugin_scripts(index).items():
         for n in names:
-            by_basename.setdefault(n, set()).add("%s:%s" % (plugin, plugin))
+            by.setdefault(n, set()).add("%s:%s" % (plugin, plugin))
     for skill, entry in kmap.items():
         scripts = entry.get("scripts")
         if isinstance(scripts, list):
             for n in scripts:
-                by_basename.setdefault(str(n), set()).add(skill)
+                by.setdefault(str(n), set()).add(skill)
+    return by
+
+
+def _banner_map(kmap):
     banners = []
     for skill, entry in kmap.items():
         pat = entry.get("banner")
@@ -891,10 +888,26 @@ def known_skills(payload, routes, index):
                 banners.append((skill, re.compile(str(pat))))
             except re.error:
                 pass
+    return banners
+
+
+SCAN_TAIL_BYTES = 512 * 1024   # huge transcripts are tail-bounded (Review Focus 1)
+
+
+def _scan_known_file(tp, by_basename, banners):
+    """One pass over transcript file tp: the set of known skills AFTER the last compact
+    boundary. Shared by known_skills (one payload) and refresh_familiarity (many files).
+    Files larger than SCAN_TAIL_BYTES are read from the tail only, so a 200 MB transcript
+    cannot blow the hook budget."""
     known = set()
     try:
-        with open(tp, encoding="utf-8", errors="replace") as fh:
-            for line in fh:
+        size = os.path.getsize(tp)
+        with open(tp, "rb") as fh:
+            if size > SCAN_TAIL_BYTES:
+                fh.seek(size - SCAN_TAIL_BYTES)
+                fh.readline()          # discard the partial first line
+            for raw in fh:
+                line = raw.decode("utf-8", errors="replace")
                 if not line.strip():
                     continue
                 try:
@@ -929,6 +942,137 @@ def known_skills(payload, routes, index):
     except OSError:
         return set()
     return known
+
+
+def known_skills(payload, routes, index):
+    """Skills whose knowledge is already in context AFTER the last compact_boundary, one pass
+    over the transcript: Skill tool_use loads, Bash runs of a plugin's executable (marks the
+    plugin's own skill "P:P", plus any skill whose knowledge[skill].scripts lists the
+    basename), and knowledge[skill].banner regexes matched against each record's RAW line
+    (attachments/hook output are embedded there). Fail OPEN to set()."""
+    tp = (payload.get("transcript_path") or "").strip() if isinstance(payload, dict) else ""
+    if not tp or not os.path.isfile(tp):
+        return set()
+    kmap = knowledge_map()
+    return _scan_known_file(tp, _basename_skill_map(index, kmap), _banner_map(kmap))
+
+
+# ---------------------------------------------------------------- familiarity cache (0.3.0)
+
+FAMILIARITY_WINDOW_DAYS = 30
+
+
+def habit_weight(uses):
+    """Graded long-run habit weight (user 2026-11-28: fade gradually, never a hard cutoff):
+    max(0.15, 1 / (1 + uses/5)); uses = summed per-session weights over the last 30 days."""
+    return max(0.15, 1.0 / (1.0 + float(uses) / 5.0))
+
+
+def _familiarity_path():
+    return state_home() / "familiarity.json"
+
+
+def _load_familiarity():
+    data = _load_json(_familiarity_path(), {})
+    return data if isinstance(data, dict) else {}
+
+
+def familiarity_uses(now=None):
+    """{skill: summed weight} over the last 30 days; corrupt/missing cache -> {}."""
+    now = now if now is not None else time.time()
+    cutoff = now - FAMILIARITY_WINDOW_DAYS * 86400
+    out = {}
+    for skill, sessions in _load_familiarity().items():
+        if skill == "_meta" or not isinstance(sessions, dict):
+            continue
+        total = 0.0
+        for entry in sessions.values():
+            if isinstance(entry, list) and len(entry) == 2:
+                try:
+                    day = time.mktime(time.strptime(str(entry[0]), "%Y-%m-%d"))
+                    w = float(entry[1])
+                except (ValueError, OverflowError, TypeError):
+                    continue
+                if day >= cutoff:
+                    total += w
+        if total > 0:
+            out[skill] = total
+    return out
+
+
+def refresh_familiarity(max_files=200, budget_s=2.0, now=None):
+    """Scan transcripts newer than the last-scan watermark and merge them into
+    familiarity.json ({skill: {session_id: [YYYY-MM-DD, weight]}}). Bounded: <= max_files
+    files and <= budget_s wall; on overrun the STALE cache is kept (no partial write).
+    Entries older than 30 days are dropped on write; the write is atomic (temp+os.replace).
+    Returns the number of files scanned."""
+    now = now if now is not None else time.time()
+    root = os.environ.get("SUMMON_SKILLS_TRANSCRIPTS") or os.path.expanduser("~/.claude/projects")
+    cache = _load_familiarity()
+    meta = cache.get("_meta")
+    try:
+        watermark = float(meta.get("last_scan_mtime") or 0.0) if isinstance(meta, dict) else 0.0
+    except (TypeError, ValueError):
+        watermark = 0.0
+    paths = []
+    for pat in ("*/*.jsonl", "*.jsonl"):
+        paths.extend(glob.glob(os.path.join(root, pat)))
+    try:
+        paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    except OSError:
+        pass
+    candidates = []
+    for p in paths:
+        try:
+            if os.path.getmtime(p) > watermark:
+                candidates.append(p)
+        except OSError:
+            continue
+    candidates = candidates[:max_files]
+    kmap = knowledge_map()
+    by_basename = _basename_skill_map(load_index(stale_ok=True), kmap)
+    banners = _banner_map(kmap)
+    t0 = time.monotonic()
+    scanned = 0
+    new_entries = {}
+    max_mtime = watermark
+    for p in candidates:
+        if time.monotonic() - t0 > budget_s:
+            return scanned          # overrun: keep the stale cache, no write
+        try:
+            mtime = os.path.getmtime(p)
+        except OSError:
+            continue
+        max_mtime = max(max_mtime, mtime)
+        sid = os.path.splitext(os.path.basename(p))[0]
+        date = time.strftime("%Y-%m-%d", time.localtime(mtime))
+        for skill in _scan_known_file(p, by_basename, banners):
+            new_entries.setdefault(skill, {})[sid] = [date, 1.0]  # 0.5 declines land in Task 5
+        scanned += 1
+    horizon = time.strftime("%Y-%m-%d", time.localtime(now - FAMILIARITY_WINDOW_DAYS * 86400))
+    for skill, sessions in new_entries.items():
+        cache.setdefault(skill, {}).update(sessions)
+    for skill in list(cache):
+        if skill == "_meta":
+            continue
+        sess = cache[skill]
+        if isinstance(sess, dict):
+            for sid in list(sess):
+                e = sess[sid]
+                if isinstance(e, list) and e and str(e[0]) < horizon:
+                    del sess[sid]
+            if not sess:
+                del cache[skill]
+    cache["_meta"] = {"last_scan_mtime": max_mtime}
+    try:
+        path = _familiarity_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cache), encoding="utf-8")
+        os.replace(str(tmp), str(path))
+    except OSError:
+        pass
+    return scanned
 
 
 def save_shown(session_id, shown):
@@ -1101,6 +1245,10 @@ def _hook_pretool(payload):
 
 def hook_session_start(payload):
     prune_sessions()
+    try:
+        refresh_familiarity()
+    except Exception:
+        pass  # fail open: the familiarity cache is best-effort
     routes, errors = load_routes()
     # Synchronous on purpose: announcing newly installed skills is this hook's job. If it is
     # killed mid-build, the next prompt hook (stale_ok) finishes the build in the background.
