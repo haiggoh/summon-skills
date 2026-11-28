@@ -943,3 +943,83 @@ def test_local_routes_without_new_keys(home):
     assert ss.knowledge_map().get("waypoints:waypoints")   # default seed still merged
     picked = ss.suggest("zebra", routes, ss.load_index(), (), ss.DEFAULT_MAX, ctx={})[0]
     assert "dataviz" in [s for s, _ in picked]
+
+
+# ---------------------------------------------------------------- Task 8 (0.4.0): tool-output + command triggers
+
+def _posttool(sid, result, tmp_path, tp=None):
+    payload = {"session_id": sid, "tool_name": "Bash",
+               "tool_input": {"command": "pytest -q"}, "tool_response": result,
+               "cwd": str(tmp_path)}
+    if tp:
+        payload["transcript_path"] = tp
+    return ss.hook_posttool(payload)
+
+
+def test_failing_tests_output_suggests_debugging(home, tmp_path, monkeypatch):
+    monkeypatch.setattr(ss, "session_dir", lambda: tmp_path / "sessions")
+    out = ""
+    for _ in range(10):   # rate gate: eligible only on call 10
+        out = _posttool("t8a", ".....\n3 failed, 12 passed in 2.1s\n", tmp_path)
+    assert "systematic-debugging" in out, out
+    assert "PostToolUse" in out
+    assert "permissionDecision" not in out and "decision" not in out
+
+
+def test_output_trigger_rate_limited(home, tmp_path, monkeypatch):
+    # two matching routes within 10 calls -> exactly one trigger
+    home.plugin("p", ["a", "b"])
+    home.sync()
+    _routes_file(tmp_path, monkeypatch, [
+        {"id": "oa", "kind": "domain", "match": {"words": ["zzq"]}, "on_output": ["boom"],
+         "skills": ["p:a"]},
+        {"id": "ob", "kind": "domain", "match": {"words": ["zzq"]}, "on_output": ["boom"],
+         "skills": ["p:b"]}])
+    monkeypatch.setattr(ss, "session_dir", lambda: tmp_path / "sessions")
+    outs = [_posttool("t8b", "boom", tmp_path) for _ in range(10)]
+    assert sum(1 for o in outs if o) == 1, outs
+
+
+def test_output_trigger_once_per_route(home, tmp_path, monkeypatch):
+    home.plugin("p", ["a"])
+    home.sync()
+    _routes_file(tmp_path, monkeypatch, [
+        {"id": "oa", "kind": "domain", "match": {"words": ["zzq"]}, "on_output": ["boom"],
+         "skills": ["p:a"]}])
+    monkeypatch.setattr(ss, "session_dir", lambda: tmp_path / "sessions")
+    outs = [_posttool("t8c", "boom", tmp_path) for _ in range(20)]
+    assert sum(1 for o in outs if o) == 1, outs
+
+
+def test_output_trigger_respects_known_and_declined(home, tmp_path, monkeypatch):
+    home.plugin("p", ["a"])
+    home.sync()
+    _routes_file(tmp_path, monkeypatch, [
+        {"id": "oa", "kind": "domain", "match": {"words": ["zzq"]}, "on_output": ["boom"],
+         "skills": ["p:a"]}])
+    monkeypatch.setattr(ss, "session_dir", lambda: tmp_path / "sessions")
+    tp = tmp_path / "t.jsonl"
+    _write_transcript(tp, [_skill_use("p:a")])          # known via Skill load
+    outs = [_posttool("t8d", "boom", tmp_path, tp) for _ in range(10)]
+    assert all(o == "" for o in outs), outs
+    ss._save_barrier("t8e", {"declined": ["p:a"]}, new_batch=True)   # declined
+    outs = [_posttool("t8e", "boom", tmp_path) for _ in range(10)]
+    assert all(o == "" for o in outs), outs
+
+
+def test_git_commit_command_suggests_verification(home, tmp_path, monkeypatch):
+    monkeypatch.setattr(ss, "session_dir", lambda: tmp_path / "sessions")
+    tp = tmp_path / "t.jsonl"
+    _write_transcript(tp, [])
+    out = ss.hook_pretool({"session_id": "t8f", "tool_name": "Bash",
+                           "tool_input": {"command": "git commit -m x"},
+                           "transcript_path": str(tp), "cwd": str(tmp_path)})
+    assert "verification-before-completion" in out, out
+    assert "PreToolUse" in out
+    assert "permissionDecision" not in out
+
+
+def test_posttool_never_blocks_and_fails_open(home, tmp_path, capsys):
+    assert ss.run_hook("posttool", io.StringIO("garbage{{{")) == 0
+    assert capsys.readouterr().out == ""
+    assert ss.hook_posttool("not a dict") == ""

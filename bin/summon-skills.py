@@ -373,6 +373,12 @@ def compile_route(route):
         route["_intent_re"] = re.compile("|".join("(?:%s)" % r for r in intent), re.I)
     else:
         route["_intent_re"] = None
+    on_out = route.get("on_output")
+    route["_on_output_re"] = re.compile("|".join("(?:%s)" % r for r in on_out), re.I) \
+        if isinstance(on_out, list) and on_out else None
+    on_cmd = route.get("on_command")
+    route["_on_command_re"] = re.compile("|".join("(?:%s)" % r for r in on_cmd), re.I) \
+        if isinstance(on_cmd, list) and on_cmd else None
     ex = [_phrase_re(w) for w in route.get("exclude", [])]
     route["_ex"] = re.compile("|".join(ex), re.I) if ex else None
     return route
@@ -1383,8 +1389,9 @@ def _hook_pretool(payload):
         pending = {}
     if not isinstance(deferred, dict):
         deferred = {}
-    if not pending and not deferred:
-        return ""
+    is_bash = (payload.get("tool_name") or "") == "Bash"
+    if not pending and not deferred and not is_bash:
+        return ""   # 0.4.0: Bash calls still get on_command trigger checks
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
         tool_input = {}
@@ -1438,6 +1445,31 @@ def _hook_pretool(payload):
                 target = ("deferred", sk)
                 break
     if target is None:
+        # 0.4.0 on_command triggers (PreToolUse): e.g. `git commit` -> verification skill
+        cmd = ""
+        if (payload.get("tool_name") or "") == "Bash" and isinstance(tool_input, dict):
+            cmd = str(tool_input.get("command") or "")
+        if cmd:
+            cfired = dict(st.get("command_fired") or {})
+            declined = set(st.get("declined") or [])
+            installed = index.get("skills", {})
+            for route in routes:
+                rx = route.get("_on_command_re")
+                if rx is None or route["id"] in cfired or not rx.search(cmd):
+                    continue
+                for skill in route.get("skills", []):
+                    info = installed.get(skill) or (
+                        {"invocable": True} if skill in route.get("_builtin", ()) else None)
+                    if info and info.get("invocable") and skill not in known \
+                            and skill not in declined:
+                        cfired[route["id"]] = True
+                        st["command_fired"] = cfired
+                        _save_barrier(session_id, st)
+                        return _emit_context(
+                            "PreToolUse",
+                            "summon-skills: command matched -> %s (%s) -- invoke it if useful; "
+                            "this call was NOT blocked." % (skill, route["id"]))
+                    break
         _save_barrier(session_id, st)
         return ""
     # Remind at most REMINDER_LIMIT times per suggestion batch — claimed ATOMICALLY: two
@@ -1525,6 +1557,92 @@ def unrouted_skills(routes, index):
                   if i.get("invocable") and s not in covered)
 
 
+def _tool_result_text(payload):
+    """Best-effort text of a tool result from a PostToolUse payload. Hook docs (verified
+    2026-11-28, code.claude.com/docs/en/hooks): the event-specific `tool_response` field
+    carries the result — a string, an object with stdout/stderr, or content blocks.
+    Fail open to "" on anything unrecognized."""
+    tr = payload.get("tool_response") if isinstance(payload, dict) else None
+    if isinstance(tr, str):
+        return tr
+    if isinstance(tr, dict):
+        parts = [tr.get("stdout"), tr.get("stderr"), tr.get("output")]
+        text = "\n".join(str(p) for p in parts if isinstance(p, str))
+        if text:
+            return text
+        content = tr.get("content")
+        if isinstance(content, list):
+            return "\n".join(b.get("text", "") for b in content
+                             if isinstance(b, dict) and isinstance(b.get("text"), str))
+        return ""
+    if isinstance(tr, list):
+        return "\n".join(b.get("text", "") for b in tr
+                         if isinstance(b, dict) and isinstance(b.get("text"), str))
+    return ""
+
+
+def _emit_context(event, text):
+    """The only output shape a PostToolUse/PreToolUse reminder may use: additionalContext,
+    never a decision field (hooks must never block)."""
+    return json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}})
+
+
+OUTPUT_TRIGGER_EVERY_N_CALLS = 10   # <= 1 output-trigger per 10 tool calls
+ON_OUTPUT_SCAN_CHARS = 4000          # on_output scans the first 4000 chars of the result
+
+
+def hook_posttool(payload):
+    """0.4.0: PostToolUse (Bash) — on_output triggers. Never blocks, never raises."""
+    try:
+        with _session_lock(payload.get("session_id") or "nosession"):
+            return _hook_posttool(payload)
+    except Exception:
+        return ""  # fail open
+
+
+def _hook_posttool(payload):
+    if not isinstance(payload, dict) or (payload.get("tool_name") or "") != "Bash":
+        return ""
+    session_id = payload.get("session_id") or "nosession"
+    st = _load_barrier(session_id)
+    calls = int(st.get("tool_calls") or 0) + 1
+    st["tool_calls"] = calls
+    result = _tool_result_text(payload)[:ON_OUTPUT_SCAN_CHARS]
+    out = ""
+    if result and calls % OUTPUT_TRIGGER_EVERY_N_CALLS == 0:
+        routes, _ = load_routes()
+        index = load_index(stale_ok=True)
+        installed = index.get("skills", {})
+        known = known_skills(payload, routes, index)
+        declined = set(st.get("declined") or [])
+        uses = familiarity_uses()
+        fired = dict(st.get("output_fired") or {})
+        cands = []
+        for route in routes:
+            rx = route.get("_on_output_re")
+            if rx is None or route["id"] in fired or not rx.search(result):
+                continue
+            for skill in route.get("skills", []):
+                info = installed.get(skill) or (
+                    {"invocable": True} if skill in route.get("_builtin", ()) else None)
+                if info and info.get("invocable") and skill not in known and skill not in declined:
+                    cands.append((habit_weight(float(uses.get(skill, 0.0))), route["id"], skill))
+                    break
+        if cands:
+            cands.sort()   # lowest habit weight first: the rare skill wins the slot
+            _w, rid, skill = cands[0]
+            fired[rid] = True
+            st["output_fired"] = fired
+            out = _emit_context("PostToolUse",
+                                "summon-skills: tool output matched -> %s (%s) -- invoke it if "
+                                "useful; this call was NOT blocked." % (skill, rid))
+    try:
+        _save_barrier(session_id, st)
+    except OSError:
+        pass
+    return out
+
+
 def run_hook(kind, stdin):
     """Entry point for hooks: never raises, never blocks, exit code always 0."""
     if os.environ.get("SUMMON_SKILLS_OFF") == "1":
@@ -1536,6 +1654,8 @@ def run_hook(kind, stdin):
             out = hook_prompt(payload)
         elif kind == "pretool":
             out = hook_pretool(payload)
+        elif kind == "posttool":
+            out = hook_posttool(payload)
         else:
             out = hook_session_start(payload)
         if out:
@@ -1652,7 +1772,7 @@ def main(argv=None):
     parser.add_argument("--version", action="version", version=VERSION)
     sub = parser.add_subparsers(dest="cmd", metavar="COMMAND")
     p = sub.add_parser("hook", help="hook entry point (reads hook JSON on stdin)")
-    p.add_argument("kind", choices=["session-start", "prompt", "pretool"])
+    p.add_argument("kind", choices=["session-start", "prompt", "pretool", "posttool"])
     p = sub.add_parser("match", help="show what would be suggested for TEXT")
     p.add_argument("text", nargs="+")
     p.add_argument("--max", type=int, default=DEFAULT_MAX)
@@ -1678,7 +1798,7 @@ def main(argv=None):
         parser.print_help(sys.stderr)
         return 2
     if args.cmd == "hook":
-        kind = {"prompt": "prompt", "pretool": "pretool"}.get(args.kind, "session")
+        kind = {"prompt": "prompt", "pretool": "pretool", "posttool": "posttool"}.get(args.kind, "session")
         return run_hook(kind, sys.stdin)
     return {"match": cmd_match, "map": cmd_map, "unrouted": cmd_unrouted, "audit": cmd_audit,
             "replay": cmd_replay, "doctor": cmd_doctor, "reindex": cmd_reindex}[args.cmd](args)
