@@ -153,9 +153,14 @@ def test_regression_positives_hold(home):
     for r in routes0:
         builtins.update(r.get("_builtin", ()))
     for skill in sorted(named):
-        if ":" in skill and skill not in builtins:
+        if skill in builtins:
+            continue
+        if ":" in skill:
             plugin, name = skill.split(":", 1)
             home.plugin(plugin, [name])
+        else:
+            from test_summon_skills import write_skill
+            write_skill(home.ch, skill)   # user-scope skill (no plugin prefix)
     home.sync()
     routes, errors = ss.load_routes()
     assert errors == []
